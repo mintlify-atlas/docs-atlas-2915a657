@@ -72,7 +72,7 @@ Indicates code that is almost certainly incorrect:
 
 ### Default Rules
 
-These rules run automatically with `pgvet check`:
+These rules run automatically when you run `pgvet`:
 
 ```go
 // From rule/registry.go
@@ -114,15 +114,28 @@ func Extra() []Rule {
 
 See [Opt-In Rules](/rules/opt-in-rules) for detailed documentation.
 
+### All Rules (Including Opt-In)
+
+To get all rules programmatically (both default and opt-in):
+
+```go
+// From rule/registry.go
+func AllIncludingExtra() []Rule {
+    return append(All(), Extra()...)
+}
+```
+
+This function is used internally when `--rules` is specified to search the full rule pool.
+
 ## Enabling and Disabling Rules
 
-### Disable Specific Rules
+### Exclude Specific Rules
 
-Use `--disable` to skip rules:
+Use `--exclude` to skip rules:
 
 ```bash
-pgvet check --disable select-star
-pgvet check --disable select-star,limit-without-order
+pgvet --exclude select-star migrations/
+pgvet --exclude select-star,limit-without-order migrations/
 ```
 
 ### Enable Opt-In Rules
@@ -130,16 +143,19 @@ pgvet check --disable select-star,limit-without-order
 Use `--rules` to explicitly enable extra rules:
 
 ```bash
-pgvet check --rules multi-statement
+pgvet --rules multi-statement migrations/
 ```
 
-### Disable All Default Rules
+### Run Only Specific Rules
 
-You can run only specific rules:
+You can run only the rules you specify:
 
 ```bash
 # Run only the multi-statement rule
-pgvet check --rules multi-statement
+pgvet --rules multi-statement migrations/
+
+# Run multiple specific rules
+pgvet --rules select-star,delete-without-where migrations/
 ```
 
 ## How Rules Work
