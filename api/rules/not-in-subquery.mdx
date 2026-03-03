@@ -1,0 +1,134 @@
+---
+title: not-in-subquery
+description: Rule that detects NOT IN with subqueries that can return NULL
+---
+
+<Warning>
+**Severity**: Error
+</Warning>
+
+## Overview
+
+The `not-in-subquery` rule flags the use of `NOT IN (SELECT ...)` because it produces incorrect results when the subquery can return `NULL` values. This is one of the most common SQL gotchas.
+
+**Rule name**: `not-in-subquery`
+
+**Default severity**: Error
+
+## When This Rule Triggers
+
+This rule triggers when:
+
+- `NOT IN` is used with a subquery: `NOT IN (SELECT ...)`
+
+The rule **does not** trigger when:
+
+- `IN` is used with a subquery (without `NOT`)
+- `NOT IN` is used with a literal list: `NOT IN (1, 2, 3)`
+- Alternative constructs like `NOT EXISTS` are used
+
+## Why It Matters
+
+### The NULL Problem
+
+In SQL, `NOT IN (SELECT ...)` uses three-valued logic. When the subquery returns any `NULL` value:
+
+- The entire `NOT IN` expression evaluates to `NULL` (not `TRUE` or `FALSE`)
+- Rows are filtered out as if the condition were `FALSE`
+- **You get zero results**, even when you expect some
+
+This behavior surprises most developers and leads to subtle bugs.
+
+### Example of the Problem
+
+```sql
+-- Users table: id values [1, 2, 3]
+-- Banned table: user_id values [1, NULL]
+
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned);
+-- Returns: ZERO rows (expected 2 and 3!)
+```
+
+Because `banned.user_id` contains `NULL`, the `NOT IN` evaluates to `NULL` for all rows.
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: NOT IN with subquery">
+    ```sql
+    SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned)
+    ```
+    
+    **Issue**: If `banned.user_id` can contain `NULL`, this query returns zero rows unexpectedly.
+  </Accordion>
+
+  <Accordion title="Good: Use NOT EXISTS instead">
+    ```sql
+    SELECT * FROM users 
+    WHERE NOT EXISTS (
+      SELECT 1 FROM banned WHERE banned.user_id = users.id
+    )
+    ```
+    
+    **Why it's better**: `NOT EXISTS` handles `NULL` values correctly and has clearer semantics.
+  </Accordion>
+
+  <Accordion title="Good: NOT IN with literal list">
+    ```sql
+    SELECT * FROM users WHERE status NOT IN ('banned', 'deleted')
+    ```
+    
+    **Why it's allowed**: Literal lists don't have the NULL problem. This is safe and performant.
+  </Accordion>
+
+  <Accordion title="Good: IN with subquery (without NOT)">
+    ```sql
+    SELECT * FROM users WHERE id IN (SELECT user_id FROM active)
+    ```
+    
+    **Why it's allowed**: `IN` (without `NOT`) handles `NULL` values as expected in most cases.
+  </Accordion>
+
+  <Accordion title="Alternative: LEFT JOIN with NULL check">
+    ```sql
+    SELECT u.* FROM users u
+    LEFT JOIN banned b ON u.id = b.user_id
+    WHERE b.user_id IS NULL
+    ```
+    
+    **Why it works**: Explicitly checks for the absence of matching rows, handling `NULL` correctly.
+  </Accordion>
+</AccordionGroup>
+
+## Implementation Details
+
+The rule works by:
+
+1. Walking the SQL AST to find `BoolExpr` nodes
+2. Checking if the boolean expression is a `NOT_EXPR`
+3. Inspecting arguments to see if they contain `SubLink` nodes with `ANY_SUBLINK` type
+4. PostgreSQL's parser represents `NOT IN (SELECT ...)` as `NOT (ANY (SELECT ...))`
+5. Reporting an error at the location of the `NOT` expression
+
+Implementation: [`not_in_subquery.go`](https://github.com/mnafees/pgvet/blob/main/rule/not_in_subquery.go)
+
+## How to Disable
+
+You can disable this rule in your pgvet configuration:
+
+```yaml
+rules:
+  not-in-subquery:
+    enabled: false
+```
+
+Or disable it for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore not-in-subquery
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned)
+```
+
+<Warning>
+Disabling this rule is strongly discouraged. The `NOT IN` subquery bug is a common source of production issues. Always prefer `NOT EXISTS` for correctness.
+</Warning>

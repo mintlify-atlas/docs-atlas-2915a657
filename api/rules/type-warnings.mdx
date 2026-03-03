@@ -1,0 +1,305 @@
+---
+title: Type Warnings
+description: Rules that detect problematic PostgreSQL type usage
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+These rules flag the use of PostgreSQL types that have problematic behavior or better alternatives. They help you avoid common type-related pitfalls.
+
+**Rules covered**:
+- `ban-char-type`: Flags `char(n)` / `character(n)` types
+- `timestamp-without-timezone`: Flags `timestamp` without time zone
+
+**Default severity**: Warning
+
+---
+
+## ban-char-type
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `char(n)` or `character(n)` is used in `CREATE TABLE`
+- `char(n)` or `character(n)` is used in `ALTER TABLE ADD COLUMN`
+- `::char(n)` or `::character(n)` is used in a `CAST`
+
+The rule **does not** trigger when:
+
+- `varchar(n)` or `character varying(n)` is used
+- `text` is used
+- Other string types are used
+
+### Why It Matters
+
+#### Space Padding Behavior
+
+The `char(n)` type is fixed-length and **pads values with spaces** to fill the specified length:
+
+```sql
+CREATE TABLE test (code char(10));
+
+INSERT INTO test VALUES ('ABC');
+
+-- The value is stored as 'ABC       ' (7 spaces added!)
+SELECT code, length(code) FROM test;
+-- Result: 'ABC       ', 10
+
+-- Comparisons can be surprising
+SELECT * FROM test WHERE code = 'ABC';  -- Matches! (trailing spaces ignored in comparison)
+SELECT * FROM test WHERE code LIKE 'ABC';  -- Doesn't match! (LIKE is sensitive to spaces)
+```
+
+#### Problems This Causes
+
+1. **Storage waste**: Always uses the full `n` bytes, even for short values
+2. **Surprising behavior**: Space padding confuses application code
+3. **Comparison inconsistencies**: `=` ignores trailing spaces, but `LIKE` doesn't
+4. **Export/import issues**: Trailing spaces may be preserved or stripped depending on the tool
+5. **No performance benefit**: Modern PostgreSQL treats `varchar` and `char` identically
+
+### Better Alternatives
+
+- **Use `text`**: Variable-length, no padding, no arbitrary limits
+- **Use `varchar(n)`**: Variable-length with optional limit, no padding
+- **Use check constraints**: For validation, use `CHECK (length(col) <= n)` instead
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: char(n) in CREATE TABLE">
+    ```sql
+    CREATE TABLE t (code char(10))
+    ```
+    
+    **Issue**: Values will be space-padded to 10 characters.
+  </Accordion>
+
+  <Accordion title="Problematic: character(n) in CREATE TABLE">
+    ```sql
+    CREATE TABLE t (code character(10))
+    ```
+    
+    **Issue**: `character(n)` is just an alias for `char(n)`. Same padding problem.
+  </Accordion>
+
+  <Accordion title="Problematic: CAST to char">
+    ```sql
+    SELECT x::char(5) FROM t
+    ```
+    
+    **Issue**: Truncates or pads to 5 characters with spaces.
+  </Accordion>
+
+  <Accordion title="Good: Use varchar">
+    ```sql
+    CREATE TABLE t (name varchar(100))
+    ```
+    
+    **Why it's better**: Variable-length, no padding, optional length limit.
+  </Accordion>
+
+  <Accordion title="Good: Use text">
+    ```sql
+    CREATE TABLE t (name text)
+    ```
+    
+    **Why it's better**: Variable-length, no padding, no arbitrary limits. Most flexible.
+  </Accordion>
+
+  <Accordion title="Good: CAST to text">
+    ```sql
+    SELECT x::text FROM t
+    ```
+    
+    **Why it's better**: No padding, preserves the original value.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## timestamp-without-timezone
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `timestamp` (without time zone) is used in `CREATE TABLE`
+- `timestamp without time zone` is explicitly used
+- `::timestamp` (without time zone) is used in a `CAST`
+
+The rule **does not** trigger when:
+
+- `timestamptz` or `timestamp with time zone` is used
+
+### Why It Matters
+
+#### Lost Timezone Context
+
+The `timestamp` type stores date and time **without timezone information**:
+
+```sql
+CREATE TABLE events (created_at timestamp);
+
+INSERT INTO events VALUES ('2024-01-15 14:00:00');
+
+-- Is this 2PM UTC? 2PM EST? 2PM local? You can't tell!
+```
+
+This causes problems:
+
+1. **Ambiguity**: You don't know what timezone the timestamp represents
+2. **DST issues**: Daylight saving time transitions create duplicate or missing hours
+3. **Global applications**: Users in different timezones see different local times with no context
+4. **Comparison issues**: Comparing timestamps from different timezones is meaningless
+
+#### Real-World Example
+
+```sql
+-- User in New York (EST) creates an event at 2PM local
+INSERT INTO events VALUES ('2024-01-15 14:00:00');
+
+-- User in London (GMT) creates an event at 2PM local
+INSERT INTO events VALUES ('2024-01-15 14:00:00');
+
+-- These look identical but represent times 5 hours apart!
+```
+
+### Better Alternative: timestamptz
+
+Always use `timestamptz` (or `timestamp with time zone`):
+
+```sql
+CREATE TABLE events (created_at timestamptz);
+
+INSERT INTO events VALUES ('2024-01-15 14:00:00-05:00');  -- EST
+INSERT INTO events VALUES ('2024-01-15 14:00:00+00:00');  -- UTC
+
+-- These are correctly stored as different times
+-- PostgreSQL converts them to UTC internally
+-- They display in your session's timezone
+```
+
+#### Benefits of timestamptz
+
+1. **Unambiguous**: Timezone is part of the value
+2. **Correct comparisons**: Times are stored in UTC, compared accurately
+3. **Automatic conversion**: PostgreSQL converts to/from your session timezone
+4. **DST-safe**: Handles daylight saving time correctly
+5. **Global-ready**: Works correctly for users worldwide
+
+### Common Misconceptions
+
+**Myth**: "timestamptz stores the timezone"
+- **Reality**: `timestamptz` stores UTC internally, displays in session timezone
+
+**Myth**: "timestamp is faster"
+- **Reality**: Performance difference is negligible; correctness matters more
+
+**Myth**: "I only have local users, so timestamp is fine"
+- **Reality**: Even local users experience DST; plus your app may expand globally
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: timestamp in CREATE TABLE">
+    ```sql
+    CREATE TABLE t (created_at timestamp)
+    ```
+    
+    **Issue**: Loses timezone context. Ambiguous for global applications.
+  </Accordion>
+
+  <Accordion title="Problematic: timestamp without time zone (explicit)">
+    ```sql
+    CREATE TABLE t (created_at timestamp without time zone)
+    ```
+    
+    **Issue**: Even when explicit, the timezone information is lost.
+  </Accordion>
+
+  <Accordion title="Problematic: CAST to timestamp">
+    ```sql
+    SELECT now()::timestamp
+    ```
+    
+    **Issue**: Strips timezone information from `now()`.
+  </Accordion>
+
+  <Accordion title="Good: Use timestamptz">
+    ```sql
+    CREATE TABLE t (created_at timestamptz)
+    ```
+    
+    **Why it's better**: Preserves timezone, correct comparisons, DST-safe.
+  </Accordion>
+
+  <Accordion title="Good: timestamp with time zone (explicit)">
+    ```sql
+    CREATE TABLE t (created_at timestamp with time zone)
+    ```
+    
+    **Why it's better**: `timestamp with time zone` is equivalent to `timestamptz`.
+  </Accordion>
+
+  <Accordion title="Good: CAST to timestamptz">
+    ```sql
+    SELECT now()::timestamptz
+    ```
+    
+    **Why it's better**: Preserves timezone information (though `now()` already returns `timestamptz`).
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Implementation Details
+
+### ban-char-type
+
+The rule works by:
+1. Checking `CREATE TABLE` and `ALTER TABLE ADD COLUMN` for `ColumnDef` nodes
+2. Checking `CAST` expressions for `TypeCast` nodes
+3. Inspecting `TypeName` to see if it's `bpchar` (internal name for `char`)
+4. Reporting a warning at the column or cast location
+
+Implementation: [`ban_char_type.go`](https://github.com/mnafees/pgvet/blob/main/rule/ban_char_type.go)
+
+### timestamp-without-timezone
+
+The rule works by:
+1. Checking `CREATE TABLE` and `ALTER TABLE ADD COLUMN` for `ColumnDef` nodes
+2. Checking `CAST` expressions for `TypeCast` nodes
+3. Inspecting `TypeName` to see if it's `timestamp` (without timezone)
+4. Reporting a warning at the column or cast location
+
+Implementation: [`timestamp_without_timezone.go`](https://github.com/mnafees/pgvet/blob/main/rule/timestamp_without_timezone.go)
+
+---
+
+## How to Disable
+
+You can disable these rules in your pgvet configuration:
+
+```yaml
+rules:
+  ban-char-type:
+    enabled: false
+  timestamp-without-timezone:
+    enabled: false
+```
+
+Or disable them for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore ban-char-type
+CREATE TABLE legacy_codes (code char(10));
+
+-- pgvet: ignore timestamp-without-timezone
+CREATE TABLE local_events (event_time timestamp);
+```

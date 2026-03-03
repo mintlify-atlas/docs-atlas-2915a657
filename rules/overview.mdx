@@ -1,0 +1,203 @@
+---
+title: Rules Overview
+description: Understanding pgvet's static analysis rule system
+---
+
+pgvet's power comes from its extensible rule system that detects common SQL pitfalls before they reach production.
+
+## Rule Architecture
+
+All pgvet rules implement the `Rule` interface defined in `rule/rule.go`:
+
+```go
+type Rule interface {
+    Name() string
+    Description() string
+    Check(stmt *pg_query.RawStmt, sql string) []Diagnostic
+}
+```
+
+Each rule:
+- Has a unique kebab-case name (e.g., `select-star`, `not-in-subquery`)
+- Provides a human-readable description
+- Analyzes parsed PostgreSQL AST nodes via `pg_query_go`
+- Returns zero or more diagnostics with file location and severity
+
+## Diagnostic Structure
+
+When a rule finds an issue, it returns a `Diagnostic`:
+
+```go
+type Diagnostic struct {
+    Rule     string   // Rule name
+    Message  string   // Description of the issue
+    File     string   // Source file path
+    Line     int      // Line number (1-based)
+    Col      int      // Column number (1-based)
+    Severity string   // "warning" or "error"
+}
+```
+
+## Severity Levels
+
+pgvet uses two severity levels:
+
+### Warning
+
+Indicates a code smell or best practice violation that's likely unintentional but not always wrong:
+
+- `select-star` - Using `SELECT *` makes code fragile
+- `limit-without-order` - Non-deterministic results (except `LIMIT 1`)
+- `update-without-where` - Accidentally updating all rows
+- `delete-without-where` - Accidentally deleting all rows
+- `insert-without-columns` - Fragile column order dependency
+- `ban-char-type` - `char(n)` pads with spaces
+- `timestamp-without-timezone` - Loses timezone context
+- `order-by-ordinal` - Fragile positional references
+- `group-by-ordinal` - Fragile positional references
+- `like-starts-with-wildcard` - Prevents index usage
+- `offset-without-limit` - Returns all remaining rows
+- `for-update-no-skip` - Can cause lock contention
+- `distinct-on-order` - Non-deterministic row selection
+
+### Error
+
+Indicates code that is almost certainly incorrect:
+
+- `not-in-subquery` - `NOT IN (SELECT ...)` broken when subquery returns NULLs
+- `null-comparison` - `= NULL` or `<> NULL` always yields NULL
+- `multi-statement` - Multiple statements in one block lose CTE scope
+
+## Default vs Opt-In Rules
+
+### Default Rules
+
+These rules run automatically with `pgvet check`:
+
+```go
+// From rule/registry.go
+func All() []Rule {
+    return []Rule{
+        &SelectStar{},
+        &LimitWithoutOrder{},
+        &NotInSubquery{},
+        &ForUpdateNoSkip{},
+        &DistinctOnOrder{},
+        &NullComparison{},
+        &UpdateWithoutWhere{},
+        &DeleteWithoutWhere{},
+        &InsertWithoutColumns{},
+        &BanCharType{},
+        &TimestampWithoutTimezone{},
+        &OrderByOrdinal{},
+        &GroupByOrdinal{},
+        &LikeStartsWithWildcard{},
+        &OffsetWithoutLimit{},
+    }
+}
+```
+
+See [Default Rules](/rules/default-rules) for detailed documentation.
+
+### Opt-In Rules
+
+These rules must be explicitly enabled because they may not apply to all codebases:
+
+```go
+// From rule/registry.go
+func Extra() []Rule {
+    return []Rule{
+        &MultiStatement{},
+    }
+}
+```
+
+See [Opt-In Rules](/rules/opt-in-rules) for detailed documentation.
+
+## Enabling and Disabling Rules
+
+### Disable Specific Rules
+
+Use `--disable` to skip rules:
+
+```bash
+pgvet check --disable select-star
+pgvet check --disable select-star,limit-without-order
+```
+
+### Enable Opt-In Rules
+
+Use `--rules` to explicitly enable extra rules:
+
+```bash
+pgvet check --rules multi-statement
+```
+
+### Disable All Default Rules
+
+You can run only specific rules:
+
+```bash
+# Run only the multi-statement rule
+pgvet check --rules multi-statement
+```
+
+## How Rules Work
+
+pgvet uses [pg_query_go](https://github.com/pganalyze/pg_query_go), which wraps libpg_query (PostgreSQL's own parser) to:
+
+1. Parse SQL into an Abstract Syntax Tree (AST)
+2. Walk the AST nodes to find problematic patterns
+3. Extract exact line and column positions for diagnostics
+
+Example rule implementation:
+
+```go
+func (r *NullComparison) Check(stmt *pg_query.RawStmt, sql string) []Diagnostic {
+    var diags []Diagnostic
+    
+    walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+        ae := node.GetAExpr()
+        if ae == nil {
+            return true
+        }
+        
+        // Check if operator is = or <>
+        if opName != "=" && opName != "<>" {
+            return true
+        }
+        
+        // Check if either operand is NULL
+        if isNullConst(ae.Lexpr) || isNullConst(ae.Rexpr) {
+            line, col := offsetToLineCol(sql, int(ae.Location))
+            diags = append(diags, Diagnostic{
+                Rule:     r.Name(),
+                Message:  r.Description(),
+                Line:     line,
+                Col:      col,
+                Severity: SeverityError,
+            })
+        }
+        return true
+    })
+    
+    return diags
+}
+```
+
+## Exit Codes
+
+- **0** - No issues found
+- **1** - Warnings or errors found
+- **2** - Fatal error (parse failure, file not found, etc.)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Default Rules" icon="shield-check" href="/rules/default-rules">
+    Explore all 15 rules that run by default
+  </Card>
+  <Card title="Opt-In Rules" icon="toggle-on" href="/rules/opt-in-rules">
+    Learn about rules that require explicit enablement
+  </Card>
+</CardGroup>

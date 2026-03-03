@@ -1,0 +1,130 @@
+---
+title: select-star
+description: Rule that detects SELECT * in outermost queries
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+The `select-star` rule flags the use of `SELECT *` in outermost queries. While convenient during development, `SELECT *` creates fragile code that can break when table schemas change.
+
+**Rule name**: `select-star`
+
+**Default severity**: Warning
+
+## When This Rule Triggers
+
+This rule triggers when:
+
+- `SELECT *` appears in the outermost query
+- `SELECT *` appears in either side of a `UNION`, `INTERSECT`, or `EXCEPT` operation at the top level
+
+The rule **does not** trigger when:
+
+- Explicit column names are listed in the outermost query
+- `SELECT *` appears only inside a CTE (Common Table Expression)
+- `SELECT *` appears only in subqueries
+
+## Why It Matters
+
+### Schema Fragility
+
+When you use `SELECT *`, your query implicitly depends on:
+
+1. The current order of columns in the table
+2. The current set of columns in the table
+3. The data types of all columns
+
+If someone adds, removes, or reorders columns in the table, your application code may:
+
+- Receive columns in an unexpected order
+- Receive unexpected columns it doesn't handle
+- Miss columns it expects
+- Experience type mismatches
+
+### Performance Impact
+
+Fetching all columns when you only need a few wastes:
+
+- Network bandwidth
+- Memory in your application
+- Database I/O and cache efficiency
+
+### Maintenance Clarity
+
+Explicit column lists make it clear what data the query actually needs, improving code readability and maintainability.
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: SELECT * in outermost query">
+    ```sql
+    SELECT * FROM users WHERE id = 1
+    ```
+    
+    **Issue**: The outermost query uses `SELECT *`, making it fragile to schema changes.
+  </Accordion>
+
+  <Accordion title="Problematic: SELECT * in UNION">
+    ```sql
+    SELECT * FROM users UNION ALL SELECT * FROM admins
+    ```
+    
+    **Issue**: Both sides of the UNION use `SELECT *` in the outermost query.
+  </Accordion>
+
+  <Accordion title="Problematic: SELECT * with CTE at outer level">
+    ```sql
+    WITH f AS (SELECT id FROM users) SELECT * FROM f
+    ```
+    
+    **Issue**: Even though the CTE uses explicit columns, the outer query uses `SELECT *`.
+  </Accordion>
+
+  <Accordion title="Good: Explicit column list">
+    ```sql
+    SELECT id, name FROM users
+    ```
+    
+    **Why it's better**: Explicitly lists only the needed columns, making the query robust to schema changes.
+  </Accordion>
+
+  <Accordion title="Good: SELECT * only inside CTE">
+    ```sql
+    WITH f AS (SELECT * FROM users) SELECT id, name FROM f
+    ```
+    
+    **Why it's allowed**: The outermost query uses explicit columns, so the result set is stable even if `SELECT *` is used internally.
+  </Accordion>
+</AccordionGroup>
+
+## Implementation Details
+
+The rule works by:
+
+1. Identifying `SELECT` statements at the outermost level
+2. For set operations (`UNION`, `INTERSECT`, `EXCEPT`), checking both left and right queries
+3. Inspecting the target list for `ColumnRef` nodes with an `A_Star` field
+4. Reporting a warning at the location of each `*` found
+
+Implementation: [`select_star.go`](https://github.com/mnafees/pgvet/blob/main/rule/select_star.go)
+
+## How to Disable
+
+You can disable this rule in your pgvet configuration:
+
+```yaml
+rules:
+  select-star:
+    enabled: false
+```
+
+Or disable it for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore select-star
+SELECT * FROM users WHERE id = 1
+```

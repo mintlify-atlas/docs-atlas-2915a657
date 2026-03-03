@@ -1,80 +1,168 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get started with pgvet in under 5 minutes
 ---
 
-## Get started in three steps
+Get pgvet running on your SQL files in just a few steps.
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Install pgvet">
+    Install using Go:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    go install github.com/mnafees/pgvet@latest
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    The first build takes ~3 minutes due to CGO compilation. See the [installation guide](/installation) for details.
+  </Step>
 
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+  <Step title="Create a sample SQL file">
+    Create a file called `test.sql` with some SQL that has common issues:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```sql test.sql
+    -- Sample queries with issues pgvet will catch
+    SELECT * FROM users;
+    
+    SELECT id, email FROM users LIMIT 10;
+    
+    SELECT * FROM posts 
+    WHERE author_id NOT IN (SELECT user_id FROM banned_users);
+    
+    UPDATE users SET last_login = NOW();
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Run pgvet">
+    Run pgvet on your SQL file:
+    
+    ```bash
+    pgvet test.sql
+    ```
+    
+    You'll see output like:
+    
+    ```
+    test.sql:2:8: warning: [select-star] SELECT * in outermost query is fragile — list columns explicitly
+    test.sql:4:39: warning: [limit-without-order] LIMIT without ORDER BY produces non-deterministic results (except LIMIT 1)
+    test.sql:7:6: warning: [select-star] SELECT * in outermost query is fragile — list columns explicitly
+    test.sql:7:28: error: [not-in-subquery] NOT IN (SELECT ...) is broken when the subquery can return NULLs — use NOT EXISTS instead
+    test.sql:10:1: warning: [update-without-where] UPDATE without WHERE updates every row in the table
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Fix the issues">
+    Update your SQL to fix the problems:
+    
+    ```sql test.sql
+    -- Fixed queries
+    SELECT id, email, created_at FROM users;
+    
+    SELECT id, email FROM users ORDER BY created_at DESC LIMIT 10;
+    
+    SELECT * FROM posts 
+    WHERE NOT EXISTS (
+      SELECT 1 FROM banned_users WHERE user_id = posts.author_id
+    );
+    
+    UPDATE users SET last_login = NOW() WHERE id = 123;
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Verify the fixes">
+    Run pgvet again to confirm all issues are resolved:
+    
+    ```bash
+    pgvet test.sql
+    ```
+    
+    Clean output means no issues were found. The exit code will be `0`.
+  </Step>
+</Steps>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+## Common workflows
+
+<CodeGroup>
+```bash Check directory
+# Check all SQL files in a directory recursively
+pgvet sql/
+pgvet migrations/
+```
+
+```bash Check multiple paths
+# Check multiple files or directories at once
+pgvet queries.sql migrations/ views/
+```
+
+```bash Use stdin
+# Pipe SQL via stdin
+echo "SELECT * FROM users" | pgvet
+cat query.sql | pgvet
+```
+
+```bash JSON output
+# Output JSON for CI integration
+pgvet --format json migrations/
+```
+
+```bash Filter rules
+# Run only specific rules
+pgvet --rules select-star,delete-without-where migrations/
+
+# Exclude specific rules
+pgvet --exclude select-star migrations/
+```
+</CodeGroup>
+
+## Understanding exit codes
+
+pgvet uses standard exit codes:
+
+- **0**: No issues found (clean)
+- **1**: Issues found (warnings or errors)
+- **2**: Usage error or parse failure
+
+This makes it easy to integrate with CI systems:
+
+```bash
+# Fail the build if any issues are found
+pgvet migrations/ || exit 1
+
+# Allow warnings, fail only on parse errors
+pgvet migrations/ ; test $? -ne 2
+```
+
+## Output format
+
+By default, pgvet outputs issues in a compiler-style format:
+
+```
+filename:line:col: severity: [rule-name] message
+```
+
+For example:
+```
+queries.sql:3:8: warning: [select-star] SELECT * in outermost query is fragile
+```
+
+Use `--format json` for structured output that's easier to parse programmatically.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Command Line" icon="terminal" href="/usage/command-line">
+    Learn all command-line flags and options
+  </Card>
+  <Card title="Rules Reference" icon="list-check" href="/rules/default-rules">
+    Browse all built-in rules and examples
+  </Card>
+  <Card title="CI Integration" icon="rocket" href="/advanced/ci-integration">
+    Set up pgvet in GitHub Actions, GitLab CI, and more
+  </Card>
+  <Card title="Custom Rules" icon="code" href="/advanced/custom-rules">
+    Write your own custom analysis rules
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+<Tip>
+Start by running pgvet on your existing SQL files with default settings. You can always fine-tune the rule selection later based on your team's needs.
+</Tip>

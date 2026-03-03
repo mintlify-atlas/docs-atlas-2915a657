@@ -1,0 +1,121 @@
+---
+title: Introduction to pgvet
+description: A static analysis tool for PostgreSQL that catches common anti-patterns and correctness issues in your SQL files
+---
+
+pgvet is a static analysis tool for PostgreSQL SQL files that catches common anti-patterns and correctness issues before they reach production. It parses your `.sql` files using the same parser that runs inside PostgreSQL itself — no running database required.
+
+## Why pgvet?
+
+SQL code quality is critical for application performance and correctness, but common issues often slip through:
+
+- **Non-deterministic queries**: `LIMIT` without `ORDER BY` returns random results
+- **Broken NULL handling**: `NOT IN (SELECT ...)` fails silently when the subquery returns NULLs
+- **Dangerous operations**: `UPDATE` or `DELETE` without `WHERE` affects every row
+- **Fragile queries**: `SELECT *` breaks when table schemas change
+- **Type system pitfalls**: Using `= NULL` instead of `IS NULL`, or `timestamp` without timezone
+
+pgvet catches these issues through static analysis, giving you fast feedback without running queries against a database.
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install pgvet via `go install` in seconds
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first analysis in under 5 minutes
+  </Card>
+  <Card title="Rules" icon="list-check" href="/rules/default-rules">
+    Browse all 15 built-in rules
+  </Card>
+</CardGroup>
+
+## Key features
+
+### Real PostgreSQL parser
+
+pgvet uses [pg_query_go](https://github.com/pganalyze/pg_query_go), which embeds the actual PostgreSQL parser. This means it understands the same SQL syntax that PostgreSQL does, including:
+
+- CTEs (Common Table Expressions)
+- Window functions
+- `DISTINCT ON`
+- `FOR UPDATE` with locking clauses
+- Complex subqueries and JOINs
+
+### 15 built-in rules
+
+pgvet ships with 15 rules that catch the most common SQL anti-patterns:
+
+- **Correctness issues** (errors): `NOT IN` with subqueries, `= NULL` comparisons
+- **Non-deterministic behavior** (warnings): `LIMIT` without `ORDER BY`, `DISTINCT ON` without matching `ORDER BY`
+- **Dangerous operations** (warnings): `UPDATE`/`DELETE` without `WHERE`, missing column lists in `INSERT`
+- **Performance pitfalls** (warnings): `LIKE` patterns starting with `%`, missing lock strategies
+- **Type system guidance** (warnings): `char(n)` vs `text`, `timestamp` without timezone
+
+See the [Rules reference](/rules/default-rules) for the complete list.
+
+### No database required
+
+Unlike tools that require a running PostgreSQL instance, pgvet works purely through static analysis. This means:
+
+- Fast: analyze hundreds of files in seconds
+- Safe: no risk of modifying data or affecting database state
+- Simple: works in CI, pre-commit hooks, or local development without setup
+- Flexible: analyze SQL files from any environment or schema version
+
+### CI-friendly output
+
+pgvet supports both human-readable text and machine-readable JSON output:
+
+```bash
+# Text output for terminal
+pgvet queries.sql
+# queries.sql:3:8: warning: [select-star] SELECT * in outermost query is fragile
+
+# JSON output for CI integration
+pgvet --format json queries.sql
+# [{"rule":"select-star","file":"queries.sql","line":3,"col":8,...}]
+```
+
+Exit codes follow standard conventions: `0` for clean, `1` for issues found, `2` for errors.
+
+## What problems does pgvet solve?
+
+<AccordionGroup>
+  <Accordion title="Catching NULL-handling bugs">
+    The query `SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned)` returns zero rows when `banned.user_id` contains any NULL value — even if the user is not banned. This is PostgreSQL's three-valued logic at work, and it's a common source of production bugs.
+
+    pgvet catches this pattern and suggests using `NOT EXISTS` instead, which handles NULLs correctly.
+  </Accordion>
+
+  <Accordion title="Preventing non-deterministic results">
+    `SELECT id FROM users LIMIT 10` returns a random 10 rows on each execution unless the table happens to have a fixed physical order. Adding `ORDER BY created_at` makes the query deterministic.
+
+    pgvet warns about `LIMIT` without `ORDER BY` (except for `LIMIT 1`, which is often used for existence checks).
+  </Accordion>
+
+  <Accordion title="Avoiding schema coupling">
+    `SELECT * FROM users` breaks when someone adds, removes, or reorders columns in the table. Application code that expects a fixed column order will fail.
+
+    pgvet flags `SELECT *` in the outermost query and encourages explicit column lists.
+  </Accordion>
+
+  <Accordion title="Guarding against dangerous operations">
+    `UPDATE users SET status = 'inactive'` without a `WHERE` clause updates every row in the table. This is rarely intentional but easy to do by accident.
+
+    pgvet warns about `UPDATE` and `DELETE` statements without `WHERE` clauses.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<Steps>
+  <Step title="Install pgvet">
+    Get started by [installing pgvet](/installation) via `go install`
+  </Step>
+  <Step title="Run your first check">
+    Follow the [quickstart guide](/quickstart) to analyze your first SQL file
+  </Step>
+  <Step title="Explore rules">
+    Learn about all [built-in rules](/rules/default-rules) and how to enable or disable them
+  </Step>
+</Steps>

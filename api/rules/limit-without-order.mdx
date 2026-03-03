@@ -1,0 +1,147 @@
+---
+title: limit-without-order
+description: Rule that detects LIMIT without ORDER BY
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+The `limit-without-order` rule flags queries that use `LIMIT` without an `ORDER BY` clause. Without explicit ordering, the database may return different rows on each execution, leading to non-deterministic results.
+
+**Rule name**: `limit-without-order`
+
+**Default severity**: Warning
+
+## When This Rule Triggers
+
+This rule triggers when:
+
+- A `SELECT` query has a `LIMIT` clause but no `ORDER BY` clause
+- The `LIMIT` value is greater than 1
+
+The rule **does not** trigger when:
+
+- `LIMIT` is used with `ORDER BY`
+- `LIMIT 1` is used (commonly for existence checks where order doesn't matter)
+- No `LIMIT` clause is present
+
+## Why It Matters
+
+### Non-Deterministic Results
+
+Without `ORDER BY`, PostgreSQL may return rows in any order, which can vary based on:
+
+- Query execution plan changes
+- Index usage changes
+- Physical storage order (which changes with `UPDATE`, `DELETE`, `VACUUM`)
+- Parallel query execution
+
+This leads to:
+
+- **Inconsistent pagination**: Different results on each page load
+- **Flaky tests**: Tests that pass/fail randomly
+- **User confusion**: Data appearing and disappearing
+- **Debugging nightmares**: Irreproducible bugs
+
+### LIMIT 1 Exception
+
+The rule exempts `LIMIT 1` because it's commonly used for existence checks or "give me any example" queries where the specific row doesn't matter:
+
+```sql
+-- This is fine - just checking if any rows exist
+SELECT 1 FROM users WHERE email = 'test@example.com' LIMIT 1
+```
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: LIMIT without ORDER BY">
+    ```sql
+    SELECT id FROM users LIMIT 10
+    ```
+    
+    **Issue**: Returns 10 arbitrary rows. Running this query twice may return different rows.
+  </Accordion>
+
+  <Accordion title="Good: LIMIT with ORDER BY">
+    ```sql
+    SELECT id FROM users ORDER BY id LIMIT 10
+    ```
+    
+    **Why it's better**: Consistently returns the first 10 users by ID, producing deterministic results.
+  </Accordion>
+
+  <Accordion title="Allowed: LIMIT 1 for existence check">
+    ```sql
+    SELECT id FROM users WHERE email = 'x' LIMIT 1
+    ```
+    
+    **Why it's allowed**: With `LIMIT 1`, you're just checking if any row exists. The specific row doesn't matter.
+  </Accordion>
+
+  <Accordion title="Good: ORDER BY for pagination">
+    ```sql
+    SELECT id, name FROM users 
+    ORDER BY created_at DESC, id DESC 
+    LIMIT 20 OFFSET 40
+    ```
+    
+    **Why it's better**: Proper pagination with stable ordering. Note the secondary sort on `id` to handle ties in `created_at`.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+### Always Include a Tiebreaker
+
+When ordering by a non-unique column, add a unique column (like `id`) as a tiebreaker:
+
+```sql
+-- Bad: non-deterministic if multiple users have same created_at
+SELECT * FROM users ORDER BY created_at LIMIT 10
+
+-- Good: deterministic even with duplicate created_at values
+SELECT * FROM users ORDER BY created_at, id LIMIT 10
+```
+
+### Pagination Pattern
+
+For stable pagination, always use `ORDER BY` with unique constraints:
+
+```sql
+SELECT * FROM products
+ORDER BY category, name, id
+LIMIT 25 OFFSET :page_offset
+```
+
+## Implementation Details
+
+The rule works by:
+
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Checking if `LimitCount` is present
+3. Checking if `SortClause` (ORDER BY) is empty
+4. Checking if the limit value is 1 (via `isLimitOne` helper)
+5. Reporting a warning at the location of the `LIMIT` clause
+
+Implementation: [`limit_without_order.go`](https://github.com/mnafees/pgvet/blob/main/rule/limit_without_order.go)
+
+## How to Disable
+
+You can disable this rule in your pgvet configuration:
+
+```yaml
+rules:
+  limit-without-order:
+    enabled: false
+```
+
+Or disable it for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore limit-without-order
+SELECT id FROM users LIMIT 10
+```

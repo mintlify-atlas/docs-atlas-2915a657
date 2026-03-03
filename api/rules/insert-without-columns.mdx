@@ -1,0 +1,201 @@
+---
+title: insert-without-columns
+description: Rule that detects INSERT statements without explicit column lists
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+The `insert-without-columns` rule flags `INSERT` statements that don't specify an explicit column list. Inserting values without naming columns creates fragile code that breaks when table schemas change.
+
+**Rule name**: `insert-without-columns`
+
+**Default severity**: Warning
+
+## When This Rule Triggers
+
+This rule triggers when:
+
+- `INSERT INTO table VALUES (...)` is used without a column list
+- `INSERT INTO table SELECT ...` is used without a column list
+
+The rule **does not** trigger when:
+
+- `INSERT INTO table (col1, col2) VALUES (...)` specifies columns
+- `INSERT INTO table (col1, col2) SELECT ...` specifies columns
+- `INSERT INTO table DEFAULT VALUES` is used (no column list needed)
+
+## Why It Matters
+
+### Schema Fragility
+
+When you insert without a column list, you implicitly depend on:
+
+1. The current order of columns in the table
+2. The current number of columns in the table
+3. The exact column positions
+
+If someone adds, removes, or reorders columns in the table:
+
+- Your `INSERT` may fail with "column count mismatch"
+- Values may go into the wrong columns
+- Your application may insert incorrect data silently
+
+### Example of the Problem
+
+```sql
+-- Original table
+CREATE TABLE users (id serial, name text);
+
+-- This INSERT works
+INSERT INTO users VALUES (1, 'Alice');
+
+-- Someone adds an email column at position 2
+ALTER TABLE users ADD COLUMN email text;
+-- New column order: id, email, name
+
+-- The same INSERT now puts 'Alice' into the email column!
+INSERT INTO users VALUES (1, 'Alice');  -- Bug!
+```
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: INSERT VALUES without columns">
+    ```sql
+    INSERT INTO users VALUES (1, 'alice')
+    ```
+    
+    **Issue**: Relies on column order. Adding or reordering columns breaks this query.
+  </Accordion>
+
+  <Accordion title="Problematic: INSERT SELECT without columns">
+    ```sql
+    INSERT INTO users SELECT * FROM temp
+    ```
+    
+    **Issue**: Relies on column order matching between `users` and `temp`. Schema changes break this.
+  </Accordion>
+
+  <Accordion title="Good: INSERT VALUES with columns">
+    ```sql
+    INSERT INTO users (id, name) VALUES (1, 'alice')
+    ```
+    
+    **Why it's better**: Explicitly maps values to columns. Robust to schema changes.
+  </Accordion>
+
+  <Accordion title="Good: INSERT SELECT with columns">
+    ```sql
+    INSERT INTO users (id, name) SELECT id, name FROM temp
+    ```
+    
+    **Why it's better**: Explicitly specifies which source columns map to which target columns.
+  </Accordion>
+
+  <Accordion title="Allowed: INSERT DEFAULT VALUES">
+    ```sql
+    INSERT INTO users DEFAULT VALUES
+    ```
+    
+    **Why it's allowed**: No values are provided, so no column list is needed. All columns get their defaults.
+  </Accordion>
+
+  <Accordion title="Good: Partial column list">
+    ```sql
+    INSERT INTO users (name) VALUES ('alice')
+    ```
+    
+    **Why it's better**: Only specifies the columns you're providing. Other columns get defaults or NULL.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+### Always List Columns
+
+Make it a habit to specify columns, even if you're providing all of them:
+
+```sql
+-- Bad
+INSERT INTO products VALUES (1, 'Widget', 9.99, 'blue');
+
+-- Good  
+INSERT INTO products (id, name, price, color) 
+VALUES (1, 'Widget', 9.99, 'blue');
+```
+
+### Benefits of Explicit Columns
+
+1. **Self-documenting**: Readers can see what each value represents
+2. **Robust to schema changes**: Adding columns doesn't break the query
+3. **Flexible ordering**: You can list columns in any order
+4. **Partial inserts**: You can omit columns to use defaults
+5. **Easier refactoring**: Tools can track column usage
+
+### Multi-Row Inserts
+
+With explicit columns, multi-row inserts are clearer:
+
+```sql
+INSERT INTO users (name, email, status)
+VALUES 
+  ('Alice', 'alice@example.com', 'active'),
+  ('Bob', 'bob@example.com', 'active'),
+  ('Charlie', 'charlie@example.com', 'pending');
+```
+
+### INSERT ... SELECT Pattern
+
+For `INSERT ... SELECT`, always list columns on both sides:
+
+```sql
+INSERT INTO users_archive (id, name, email, archived_at)
+SELECT id, name, email, NOW()
+FROM users
+WHERE status = 'deleted';
+```
+
+## When DEFAULT VALUES is Appropriate
+
+`INSERT ... DEFAULT VALUES` is useful when:
+
+- All columns have sensible defaults
+- You're creating a "blank" row to get an auto-generated ID
+- You'll update the row with actual values later
+
+```sql
+-- Create a new order, get the ID, populate later
+INSERT INTO orders DEFAULT VALUES RETURNING id;
+```
+
+## Implementation Details
+
+The rule works by:
+
+1. Checking if the statement is an `InsertStmt`
+2. Checking if the `Cols` list is empty (no column list specified)
+3. Checking if `SelectStmt` exists (not `DEFAULT VALUES`)
+4. Reporting a warning at the start of the statement
+
+Implementation: [`insert_without_columns.go`](https://github.com/mnafees/pgvet/blob/main/rule/insert_without_columns.go)
+
+## How to Disable
+
+You can disable this rule in your pgvet configuration:
+
+```yaml
+rules:
+  insert-without-columns:
+    enabled: false
+```
+
+Or disable it for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore insert-without-columns
+INSERT INTO temp_data VALUES (1, 'test')
+```

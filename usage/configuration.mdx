@@ -1,0 +1,193 @@
+---
+title: Configuration
+description: Configuring which rules to run with --rules and --exclude flags
+---
+
+pgvet allows you to customize which rules are applied to your SQL files using the `--rules` and `--exclude` flags.
+
+## Default Behavior
+
+When you run pgvet without any rule selection flags, it runs all **default rules**:
+
+```bash
+pgvet migrations/
+```
+
+The default rule set includes:
+
+- `select-star`
+- `limit-without-order`
+- `not-in-subquery`
+- `for-update-no-skip`
+- `distinct-on-order`
+- `null-comparison`
+- `update-without-where`
+- `delete-without-where`
+- `insert-without-columns`
+- `ban-char-type`
+- `timestamp-without-timezone`
+- `order-by-ordinal`
+- `group-by-ordinal`
+- `like-starts-with-wildcard`
+- `offset-without-limit`
+
+See the [Rules Reference](/rules/default-rules) for details on each rule.
+
+## Selecting Specific Rules
+
+Use the `--rules` flag to run only specific rules:
+
+```bash
+pgvet --rules=select-star,delete-without-where schema.sql
+```
+
+This runs **only** the `select-star` and `delete-without-where` rules.
+
+### Rule Name Format
+
+Rule names are:
+- Case-sensitive
+- Comma-separated (no spaces)
+- Matched exactly
+
+```bash
+# Correct
+pgvet --rules=select-star,null-comparison migrations/
+
+# Also correct (spaces are trimmed)
+pgvet --rules="select-star, null-comparison" migrations/
+```
+
+## Excluding Rules
+
+Use the `--exclude` flag to run all default rules **except** the ones you specify:
+
+```bash
+pgvet --exclude=select-star migrations/
+```
+
+This runs all default rules except `select-star`.
+
+### Exclude Multiple Rules
+
+You can exclude multiple rules using a comma-separated list:
+
+```bash
+pgvet --exclude=select-star,limit-without-order,not-in-subquery migrations/
+```
+
+## Combining --rules and --exclude
+
+When you use both flags together, pgvet:
+
+1. First selects only the rules from `--rules`
+2. Then removes any rules listed in `--exclude`
+
+```bash
+pgvet --rules=select-star,delete-without-where,update-without-where --exclude=select-star migrations/
+```
+
+This runs only `delete-without-where` and `update-without-where`.
+
+## Opt-in Rules
+
+Some rules are **opt-in** and not included in the default set. To use them, you must explicitly enable them with `--rules`.
+
+### multi-statement
+
+The `multi-statement` rule is opt-in:
+
+```bash
+pgvet --rules=multi-statement migrations/
+```
+
+This rule detects when multiple SQL statements are present in a single query block, which can cause issues with CTE visibility.
+
+<Warning>
+The `multi-statement` rule has `error` severity, unlike most default rules which are `warning` level.
+</Warning>
+
+### Enabling Opt-in Rules with Defaults
+
+To run all default rules **plus** opt-in rules, list them explicitly:
+
+```bash
+# Run only the opt-in rule
+pgvet --rules=multi-statement migrations/
+
+# Run a specific subset including an opt-in rule
+pgvet --rules=multi-statement,select-star,delete-without-where migrations/
+```
+
+<Note>
+Currently, `multi-statement` is the only opt-in rule. Future versions may add more opt-in rules for specialized analysis.
+</Note>
+
+## Common Configuration Patterns
+
+### Focus on Dangerous Operations
+
+Run only rules that detect potentially destructive operations:
+
+```bash
+pgvet --rules=delete-without-where,update-without-where migrations/
+```
+
+### Exclude Stylistic Warnings
+
+Run all default rules except stylistic ones:
+
+```bash
+pgvet --exclude=select-star,order-by-ordinal,group-by-ordinal migrations/
+```
+
+### CI/CD: Fail Only on Errors
+
+If you want to run a strict check in CI, enable only error-level rules:
+
+```bash
+pgvet --rules=multi-statement migrations/
+```
+
+Since `multi-statement` has `error` severity, this ensures your CI only fails on critical issues.
+
+### Development: Run All Rules
+
+During development, you might want to run all rules including opt-ins. Since there's currently only one opt-in rule, you can enable it alongside defaults by excluding nothing:
+
+```bash
+# Default rules only
+pgvet migrations/
+
+# With opt-in rules (must specify explicitly)
+pgvet --rules=multi-statement,select-star,limit-without-order,not-in-subquery,for-update-no-skip,distinct-on-order,null-comparison,update-without-where,delete-without-where,insert-without-columns,ban-char-type,timestamp-without-timezone,order-by-ordinal,group-by-ordinal,like-starts-with-wildcard,offset-without-limit migrations/
+```
+
+<Tip>
+For most users, the default rule set provides comprehensive coverage. Start with the defaults, then customize based on your team's specific needs and SQL patterns.
+</Tip>
+
+## Viewing Available Rules
+
+To see all available rules and their descriptions:
+
+```bash
+pgvet --help
+```
+
+The help output shows:
+- All default rules
+- Opt-in rules
+- Each rule's description
+
+Example output:
+
+```
+Default rules:
+  select-star               SELECT * in outermost query is fragile — list columns explicitly
+  limit-without-order       LIMIT without ORDER BY produces non-deterministic results
+  ...
+
+Opt-in rules (use --rules to enable):
+  multi-statement           Multiple statements in a single query block — CTEs from the first statement are not visible to subsequent ones
+```

@@ -1,0 +1,131 @@
+---
+title: Installation
+description: Install pgvet via go install and verify your setup
+---
+
+pgvet is distributed as a single binary that you can install using Go's package manager.
+
+## Prerequisites
+
+pgvet requires:
+
+- **Go 1.25.0 or later**: Check your version with `go version`
+- **CGO support**: Required for compiling the embedded PostgreSQL parser (enabled by default in standard Go installations)
+
+If you need to install or update Go, visit [go.dev/doc/install](https://go.dev/doc/install).
+
+## Install via go install
+
+Run the following command to install the latest version of pgvet:
+
+```bash
+go install github.com/mnafees/pgvet@latest
+```
+
+This installs the `pgvet` binary to your `$GOPATH/bin` directory (typically `~/go/bin`).
+
+<Note>
+  The first build takes approximately 3 minutes due to CGO compilation of the embedded PostgreSQL parser. Subsequent builds and updates are much faster.
+</Note>
+
+## Verify installation
+
+Confirm that pgvet is installed correctly:
+
+```bash
+pgvet --help
+```
+
+You should see output similar to:
+
+```
+Usage: pgvet [flags] <file-or-dir>...
+
+A static analysis tool for PostgreSQL SQL files.
+
+Flags:
+  -exclude string
+        Comma-separated list of rules to exclude
+  -format string
+        Output format: text or json (default "text")
+  -rules string
+        Comma-separated list of rules to run (default: all)
+
+Default rules:
+  select-star              SELECT * in outermost query is fragile — list columns explicitly
+  limit-without-order      LIMIT without ORDER BY produces non-deterministic results (exempts LIMIT 1)
+  not-in-subquery          NOT IN (SELECT ...) is broken when the subquery can return NULLs — use NOT EXISTS instead
+  ...
+```
+
+<Tip>
+  If you get a "command not found" error, make sure `$GOPATH/bin` is in your `PATH`. Add this to your shell profile:
+  
+  ```bash
+  export PATH="$PATH:$(go env GOPATH)/bin"
+  ```
+</Tip>
+
+## Installation via go.mod (for projects)
+
+If you want to pin a specific version of pgvet for your project, you can install it as a tool dependency:
+
+1. Create or update your `tools.go` file:
+
+```go tools.go
+//go:build tools
+
+package tools
+
+import _ "github.com/mnafees/pgvet"
+```
+
+2. Run:
+
+```bash
+go mod tidy
+go install github.com/mnafees/pgvet
+```
+
+This approach ensures that everyone on your team uses the same version of pgvet.
+
+## Docker
+
+If you prefer to run pgvet in a container, you can build a Docker image:
+
+```dockerfile Dockerfile
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache gcc musl-dev
+RUN go install github.com/mnafees/pgvet@latest
+
+FROM alpine:latest
+COPY --from=builder /go/bin/pgvet /usr/local/bin/pgvet
+ENTRYPOINT ["pgvet"]
+```
+
+Build and run:
+
+```bash
+docker build -t pgvet .
+docker run --rm -v $(pwd):/src pgvet /src/queries.sql
+```
+
+<Warning>
+  The Docker build also takes ~3 minutes due to CGO compilation. Consider using a pre-built image or caching the builder stage.
+</Warning>
+
+## Updating pgvet
+
+To update to the latest version, run the install command again:
+
+```bash
+go install github.com/mnafees/pgvet@latest
+```
+
+Updates are much faster than the initial install since Go caches the compiled dependencies.
+
+## Next steps
+
+<Card title="Quickstart" icon="rocket" href="/quickstart">
+  Run your first analysis and catch SQL issues in minutes
+</Card>

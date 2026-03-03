@@ -1,0 +1,251 @@
+---
+title: update-without-where / delete-without-where
+description: Rules that detect UPDATE and DELETE statements without WHERE clauses
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+These rules flag `UPDATE` and `DELETE` statements that lack a `WHERE` clause. Without a `WHERE` clause, these statements affect **every row** in the table, which is rarely intended and can cause catastrophic data loss.
+
+**Rule names**: 
+- `update-without-where`
+- `delete-without-where`
+
+**Default severity**: Warning
+
+## When These Rules Trigger
+
+### update-without-where
+
+This rule triggers when:
+- An `UPDATE` statement has no `WHERE` clause
+
+The rule **does not** trigger when:
+- `UPDATE` has a `WHERE` clause
+- `UPDATE` uses `FROM` with a `WHERE` clause for joins
+
+### delete-without-where
+
+This rule triggers when:
+- A `DELETE` statement has no `WHERE` clause
+
+The rule **does not** trigger when:
+- `DELETE` has a `WHERE` clause
+- `DELETE` uses `USING` with a `WHERE` clause for joins
+
+## Why It Matters
+
+### Data Loss Risk
+
+Without a `WHERE` clause:
+
+- `UPDATE` modifies **every single row** in the table
+- `DELETE` removes **every single row** from the table
+
+This is catastrophic if unintended:
+
+```sql
+-- Accidentally deactivates ALL users!
+UPDATE users SET active = false;
+
+-- Accidentally deletes ALL orders!
+DELETE FROM orders;
+```
+
+### Common Mistakes
+
+1. **Forgetting the WHERE clause**: Most common during development or in SQL clients
+2. **Wrong statement order**: Writing `UPDATE table SET col = val` and forgetting to add `WHERE` before executing
+3. **Copy-paste errors**: Copying a statement and forgetting to update the condition
+
+### When It's Intentional
+
+Sometimes you genuinely want to update/delete all rows:
+
+- Resetting a staging table
+- Bulk status updates
+- Clearing test data
+
+In these cases, it's better to be explicit:
+
+```sql
+-- If you really mean "all rows", use TRUNCATE for DELETE
+TRUNCATE TABLE test_data;
+
+-- Or add a WHERE clause that's always true to acknowledge intent
+UPDATE settings SET value = 'default' WHERE TRUE;
+```
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: UPDATE without WHERE">
+    ```sql
+    UPDATE users SET active = false
+    ```
+    
+    **Issue**: Deactivates every single user in the table, likely unintended.
+  </Accordion>
+
+  <Accordion title="Problematic: DELETE without WHERE">
+    ```sql
+    DELETE FROM users
+    ```
+    
+    **Issue**: Deletes every single user from the table. Catastrophic if unintended.
+  </Accordion>
+
+  <Accordion title="Good: UPDATE with WHERE">
+    ```sql
+    UPDATE users SET active = false WHERE id = 1
+    ```
+    
+    **Why it's better**: Only affects the specific user with `id = 1`.
+  </Accordion>
+
+  <Accordion title="Good: DELETE with WHERE">
+    ```sql
+    DELETE FROM users WHERE id = 1
+    ```
+    
+    **Why it's better**: Only deletes the specific user with `id = 1`.
+  </Accordion>
+
+  <Accordion title="Good: UPDATE with FROM and WHERE">
+    ```sql
+    UPDATE orders SET status = 'shipped' 
+    FROM shipments 
+    WHERE orders.id = shipments.order_id
+    ```
+    
+    **Why it's better**: Uses a join condition to update only matching orders.
+  </Accordion>
+
+  <Accordion title="Good: DELETE with USING and WHERE">
+    ```sql
+    DELETE FROM orders 
+    USING expired 
+    WHERE orders.id = expired.id
+    ```
+    
+    **Why it's better**: Uses a join condition to delete only matching orders.
+  </Accordion>
+
+  <Accordion title="Intentional: Explicit WHERE TRUE">
+    ```sql
+    UPDATE settings SET value = 'default' WHERE TRUE
+    ```
+    
+    **Why it's acceptable**: The `WHERE TRUE` explicitly signals "yes, I mean all rows."
+  </Accordion>
+
+  <Accordion title="Intentional: Use TRUNCATE instead of DELETE">
+    ```sql
+    TRUNCATE TABLE test_data
+    ```
+    
+    **Why it's better**: For deleting all rows, `TRUNCATE` is faster and clearer in intent.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+### Always Use WHERE
+
+Make it a habit to write `WHERE` before executing `UPDATE` or `DELETE`:
+
+```sql
+-- Start with WHERE, even if it's incomplete
+UPDATE users SET active = false WHERE ...
+
+-- Then fill in the condition
+UPDATE users SET active = false WHERE last_login < '2020-01-01'
+```
+
+### Test with SELECT First
+
+Before running `UPDATE` or `DELETE`, test your `WHERE` clause with `SELECT`:
+
+```sql
+-- First, verify which rows match
+SELECT id, email FROM users WHERE last_login < '2020-01-01';
+
+-- Then, if correct, update them
+UPDATE users SET active = false WHERE last_login < '2020-01-01';
+```
+
+### Use Transactions
+
+For critical operations, use transactions so you can rollback if something goes wrong:
+
+```sql
+BEGIN;
+
+UPDATE users SET active = false WHERE last_login < '2020-01-01';
+
+-- Verify the update
+SELECT COUNT(*) FROM users WHERE active = false;
+
+-- If correct:
+COMMIT;
+-- If wrong:
+ROLLBACK;
+```
+
+### For Intentional Bulk Operations
+
+If you genuinely need to affect all rows:
+
+```sql
+-- For DELETE, use TRUNCATE (faster and clearer)
+TRUNCATE TABLE staging_data;
+
+-- For UPDATE all rows, make intent explicit
+UPDATE config SET version = 2 WHERE TRUE;
+```
+
+## Implementation Details
+
+### update-without-where
+
+The rule works by:
+1. Checking if the statement is an `UpdateStmt`
+2. Checking if `WhereClause` is `nil`
+3. Reporting a warning at the start of the statement
+
+Implementation: [`update_without_where.go`](https://github.com/mnafees/pgvet/blob/main/rule/update_without_where.go)
+
+### delete-without-where
+
+The rule works by:
+1. Checking if the statement is a `DeleteStmt`
+2. Checking if `WhereClause` is `nil`
+3. Reporting a warning at the start of the statement
+
+Implementation: [`delete_without_where.go`](https://github.com/mnafees/pgvet/blob/main/rule/delete_without_where.go)
+
+## How to Disable
+
+You can disable these rules in your pgvet configuration:
+
+```yaml
+rules:
+  update-without-where:
+    enabled: false
+  delete-without-where:
+    enabled: false
+```
+
+Or disable them for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore update-without-where
+UPDATE settings SET value = 'default'
+
+-- pgvet: ignore delete-without-where
+DELETE FROM temp_table
+```

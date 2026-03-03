@@ -1,0 +1,190 @@
+---
+title: Rule Interface
+description: The core interface for implementing pgvet static analysis rules
+---
+
+## Overview
+
+The `Rule` interface is the foundation of pgvet's static analysis system. Every rule in pgvet implements this interface to check SQL statements and report diagnostics.
+
+## Rule Interface
+
+All pgvet rules must implement the `Rule` interface:
+
+```go
+type Rule interface {
+    Name() string
+    Description() string
+    Check(stmt *pg_query.RawStmt, sql string) []Diagnostic
+}
+```
+
+### Methods
+
+<ParamField path="Name" type="() string" required>
+  Returns the unique identifier for the rule. This name is used in diagnostic output and configuration.
+  
+  **Example:** `"delete-without-where"`
+</ParamField>
+
+<ParamField path="Description" type="() string" required>
+  Returns a human-readable description of what the rule checks for.
+  
+  **Example:** `"DELETE without WHERE deletes every row in the table"`
+</ParamField>
+
+<ParamField path="Check" type="(stmt *pg_query.RawStmt, sql string) []Diagnostic" required>
+  Analyzes a single SQL statement and returns a slice of diagnostics for any issues found.
+  
+  **Parameters:**
+  - `stmt`: The parsed PostgreSQL statement AST from pg_query_go
+  - `sql`: The original SQL text as a string
+  
+  **Returns:** A slice of `Diagnostic` structs (empty if no issues found)
+</ParamField>
+
+## Diagnostic Struct
+
+The `Diagnostic` struct represents a single issue found by a rule:
+
+```go
+type Diagnostic struct {
+    Rule     string `json:"rule"`
+    Message  string `json:"message"`
+    File     string `json:"file"`
+    Line     int    `json:"line"`
+    Col      int    `json:"col"`
+    Severity string `json:"severity"`
+}
+```
+
+### Fields
+
+<ResponseField name="Rule" type="string" required>
+  The name of the rule that generated this diagnostic (should match `Rule.Name()`)
+</ResponseField>
+
+<ResponseField name="Message" type="string" required>
+  A descriptive message explaining the issue
+</ResponseField>
+
+<ResponseField name="File" type="string">
+  The file path where the issue was found. This is typically set by the analyzer, not the rule itself.
+</ResponseField>
+
+<ResponseField name="Line" type="int" required>
+  The line number where the issue occurs (1-based)
+</ResponseField>
+
+<ResponseField name="Col" type="int" required>
+  The column number where the issue occurs (1-based)
+</ResponseField>
+
+<ResponseField name="Severity" type="string" required>
+  The severity level: either `SeverityWarning` or `SeverityError`
+</ResponseField>
+
+## Severity Constants
+
+Two severity levels are available:
+
+```go
+const (
+    SeverityWarning = "warning"
+    SeverityError   = "error"
+)
+```
+
+<ParamField path="SeverityWarning" type="string">
+  Use for issues that are potentially problematic but may be intentional. Value: `"warning"`
+</ParamField>
+
+<ParamField path="SeverityError" type="string">
+  Use for serious issues that are likely bugs or will cause problems. Value: `"error"`
+</ParamField>
+
+## Working with RawStmt
+
+The `*pg_query.RawStmt` parameter contains the parsed PostgreSQL AST. To access specific statement types, use the getter methods:
+
+```go
+func (r *MyRule) Check(stmt *pg_query.RawStmt, sql string) []Diagnostic {
+    // Check if this is a DELETE statement
+    deleteStmt := stmt.Stmt.GetDeleteStmt()
+    if deleteStmt == nil {
+        return nil  // Not a DELETE, nothing to check
+    }
+    
+    // Now work with the DELETE statement
+    if deleteStmt.WhereClause == nil {
+        // Found an issue!
+    }
+}
+```
+
+Common statement types:
+- `GetSelectStmt()` - SELECT queries
+- `GetInsertStmt()` - INSERT statements
+- `GetUpdateStmt()` - UPDATE statements
+- `GetDeleteStmt()` - DELETE statements
+- `GetCreateStmt()` - CREATE statements
+- `GetAlterTableStmt()` - ALTER TABLE statements
+
+## Complete Example
+
+Here's a complete implementation of a rule that detects DELETE statements without WHERE clauses:
+
+```go
+package rule
+
+import (
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+)
+
+type DeleteWithoutWhere struct{}
+
+func (r *DeleteWithoutWhere) Name() string {
+    return "delete-without-where"
+}
+
+func (r *DeleteWithoutWhere) Description() string {
+    return "DELETE without WHERE deletes every row in the table"
+}
+
+func (r *DeleteWithoutWhere) Check(stmt *pg_query.RawStmt, sql string) []Diagnostic {
+    // Only check DELETE statements
+    d := stmt.Stmt.GetDeleteStmt()
+    if d == nil {
+        return nil
+    }
+    
+    // If there's a WHERE clause, it's safe
+    if d.WhereClause != nil {
+        return nil
+    }
+    
+    // Found a DELETE without WHERE - report it
+    line, col := offsetToLineCol(sql, int(stmt.StmtLocation))
+    return []Diagnostic{{
+        Rule:     r.Name(),
+        Message:  r.Description(),
+        Line:     line,
+        Col:      col,
+        Severity: SeverityWarning,
+    }}
+}
+```
+
+## Best Practices
+
+1. **Return early**: If the statement type doesn't match what your rule checks, return `nil` immediately
+2. **Use helper functions**: The `offsetToLineCol` function converts byte offsets to line/column numbers
+3. **Set appropriate severity**: Use `SeverityWarning` for style/best-practice issues, `SeverityError` for bugs
+4. **Keep rules focused**: Each rule should check for one specific issue
+5. **Don't set File field**: The analyzer automatically sets the `File` field on diagnostics
+
+## See Also
+
+- [Analyzer](/api/analyzer) - Run rules against SQL files
+- [Walker](/api/walker) - Traverse the PostgreSQL AST
+- [Built-in Rules](/rules/overview) - See examples of all built-in rules

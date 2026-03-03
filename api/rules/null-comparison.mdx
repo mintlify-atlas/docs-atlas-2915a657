@@ -1,0 +1,174 @@
+---
+title: null-comparison
+description: Rule that detects incorrect NULL comparisons using = or <>
+---
+
+<Warning>
+**Severity**: Error
+</Warning>
+
+## Overview
+
+The `null-comparison` rule flags comparisons using `= NULL` or `<> NULL`. These comparisons always evaluate to `NULL` (not `TRUE` or `FALSE`), which is almost never the intended behavior.
+
+**Rule name**: `null-comparison`
+
+**Default severity**: Error
+
+## When This Rule Triggers
+
+This rule triggers when:
+
+- `= NULL` appears in a comparison
+- `<> NULL` appears in a comparison
+- `NULL = <expression>` appears in a comparison
+- `NULL <> <expression>` appears in a comparison
+
+The rule **does not** trigger when:
+
+- `IS NULL` is used
+- `IS NOT NULL` is used
+- Normal equality comparisons (not involving `NULL`) are used
+
+## Why It Matters
+
+### SQL's Three-Valued Logic
+
+In SQL, `NULL` represents an unknown value. Comparing anything to an unknown value produces an unknown result:
+
+- `NULL = NULL` → `NULL` (not `TRUE`!)
+- `NULL <> NULL` → `NULL` (not `FALSE`!)
+- `5 = NULL` → `NULL`
+- `5 <> NULL` → `NULL`
+
+In `WHERE` clauses, only rows where the condition is `TRUE` are returned. Conditions that evaluate to `NULL` or `FALSE` filter out the row.
+
+### The Bug
+
+```sql
+-- Trying to find rows where id is NULL
+SELECT * FROM users WHERE id = NULL;
+-- Returns: ZERO rows (not the rows with NULL id!)
+
+-- Trying to find rows where id is NOT NULL  
+SELECT * FROM users WHERE id <> NULL;
+-- Returns: ZERO rows (not the rows with non-NULL id!)
+```
+
+Both queries return zero rows because the comparison always evaluates to `NULL`.
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: = NULL">
+    ```sql
+    SELECT * FROM users WHERE id = NULL
+    ```
+    
+    **Issue**: Always evaluates to `NULL`, never returns any rows. Won't find rows where `id` is `NULL`.
+  </Accordion>
+
+  <Accordion title="Problematic: <> NULL">
+    ```sql
+    SELECT * FROM users WHERE id <> NULL
+    ```
+    
+    **Issue**: Always evaluates to `NULL`, never returns any rows. Won't find rows where `id` is not `NULL`.
+  </Accordion>
+
+  <Accordion title="Problematic: NULL on left side">
+    ```sql
+    SELECT * FROM users WHERE NULL = id
+    ```
+    
+    **Issue**: Same problem—always evaluates to `NULL`.
+  </Accordion>
+
+  <Accordion title="Good: IS NULL">
+    ```sql
+    SELECT * FROM users WHERE id IS NULL
+    ```
+    
+    **Why it's better**: Correctly checks if `id` is `NULL`. Returns rows where `id` is `NULL`.
+  </Accordion>
+
+  <Accordion title="Good: IS NOT NULL">
+    ```sql
+    SELECT * FROM users WHERE id IS NOT NULL
+    ```
+    
+    **Why it's better**: Correctly checks if `id` is not `NULL`. Returns rows where `id` has a value.
+  </Accordion>
+
+  <Accordion title="Good: Normal equality comparison">
+    ```sql
+    SELECT * FROM users WHERE id = 1
+    ```
+    
+    **Why it's allowed**: Comparing to an actual value (not `NULL`) works as expected.
+  </Accordion>
+</AccordionGroup>
+
+## Understanding NULL Semantics
+
+### Why NULL = NULL is NULL
+
+`NULL` represents "unknown." If you have two unknown values, you can't determine if they're equal:
+
+```sql
+-- Does Bob's unknown age equal Alice's unknown age?
+NULL = NULL  -- We don't know! So the result is NULL (unknown)
+```
+
+### Correct NULL Handling
+
+| What you want | Wrong | Correct |
+|--------------|-------|----------|
+| Is it NULL? | `col = NULL` | `col IS NULL` |
+| Is it not NULL? | `col <> NULL` | `col IS NOT NULL` |
+| Is it NULL or 5? | `col = NULL OR col = 5` | `col IS NULL OR col = 5` |
+| Is it distinct from NULL? | N/A | `col IS DISTINCT FROM NULL` |
+
+### COALESCE and NULLIF
+
+For more complex NULL handling:
+
+```sql
+-- Provide a default value if NULL
+SELECT COALESCE(middle_name, '') FROM users;
+
+-- Treat empty string as NULL  
+SELECT NULLIF(middle_name, '') FROM users;
+```
+
+## Implementation Details
+
+The rule works by:
+
+1. Walking the SQL AST to find `A_Expr` nodes with kind `AEXPR_OP`
+2. Checking if the operator is `=` or `<>`
+3. Using the `isNullConst` helper to check if either operand is a NULL constant
+4. Reporting an error at the location of the comparison operator
+
+Implementation: [`null_comparison.go`](https://github.com/mnafees/pgvet/blob/main/rule/null_comparison.go)
+
+## How to Disable
+
+You can disable this rule in your pgvet configuration:
+
+```yaml
+rules:
+  null-comparison:
+    enabled: false
+```
+
+Or disable it for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore null-comparison
+SELECT * FROM users WHERE id = NULL
+```
+
+<Warning>
+Disabling this rule is strongly discouraged. `= NULL` and `<> NULL` are almost always bugs. Use `IS NULL` and `IS NOT NULL` instead.
+</Warning>

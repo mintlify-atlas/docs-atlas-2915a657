@@ -1,0 +1,424 @@
+---
+title: Walker
+description: Traverse and inspect PostgreSQL AST nodes
+---
+
+## Overview
+
+The `walker` package provides utilities for traversing PostgreSQL abstract syntax trees (AST). It enables you to visit every node in a parse tree to find specific patterns, collect information, or analyze SQL structure.
+
+## Visitor Function Type
+
+The `Visitor` function type is called for each node during AST traversal.
+
+```go
+type Visitor func(node *pg_query.Node) bool
+```
+
+<ParamField path="node" type="*pg_query.Node" required>
+  The current AST node being visited
+</ParamField>
+
+**Returns:** `bool` - Return `true` to continue traversing child nodes, `false` to stop traversal
+
+**Example:**
+
+```go
+// Visit every node and print its type
+visitor := func(node *pg_query.Node) bool {
+    fmt.Printf("Visiting node: %T\n", node.Node)
+    return true  // Continue to children
+}
+```
+
+## Functions
+
+### Walk
+
+Recursively visits every node in the parse tree rooted at the given node.
+
+```go
+func Walk(node *pg_query.Node, visit Visitor)
+```
+
+<ParamField path="node" type="*pg_query.Node" required>
+  The root node to start traversal from
+</ParamField>
+
+<ParamField path="visit" type="Visitor" required>
+  The visitor function called for each node
+</ParamField>
+
+**Behavior:**
+- Calls `visit` for the current node
+- If `visit` returns `true`, recursively walks all child nodes
+- If `visit` returns `false`, stops traversal immediately
+- Safely handles `nil` nodes
+
+**Example - Find all function calls:**
+
+```go
+import (
+    "fmt"
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+    "github.com/mnafees/pgvet/walker"
+)
+
+func findFunctionCalls(stmt *pg_query.RawStmt) []string {
+    var functions []string
+    
+    walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+        if fc := node.GetFuncCall(); fc != nil {
+            // Extract function name
+            if len(fc.Funcname) > 0 {
+                if str := fc.Funcname[0].GetString_(); str != nil {
+                    functions = append(functions, str.Sval)
+                }
+            }
+        }
+        return true  // Keep traversing
+    })
+    
+    return functions
+}
+
+// Usage
+result, _ := pg_query.Parse("SELECT count(*), sum(price) FROM products")
+for _, stmt := range result.Stmts {
+    funcs := findFunctionCalls(stmt)
+    fmt.Println("Functions:", funcs)  // Output: Functions: [count sum]
+}
+```
+
+**Example - Find WHERE clauses:**
+
+```go
+func hasWhereClause(stmt *pg_query.RawStmt) bool {
+    found := false
+    
+    walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+        // Check for SELECT with WHERE
+        if s := node.GetSelectStmt(); s != nil && s.WhereClause != nil {
+            found = true
+            return false  // Stop searching
+        }
+        // Check for DELETE with WHERE
+        if d := node.GetDeleteStmt(); d != nil && d.WhereClause != nil {
+            found = true
+            return false
+        }
+        // Check for UPDATE with WHERE
+        if u := node.GetUpdateStmt(); u != nil && u.WhereClause != nil {
+            found = true
+            return false
+        }
+        return true  // Keep searching
+    })
+    
+    return found
+}
+```
+
+### Children
+
+Returns the direct child nodes of a given node.
+
+```go
+func Children(node *pg_query.Node) []*pg_query.Node
+```
+
+<ParamField path="node" type="*pg_query.Node" required>
+  The parent node to extract children from
+</ParamField>
+
+**Returns:** `[]*pg_query.Node` - Slice of direct child nodes (may be empty)
+
+**Behavior:**
+- Returns only immediate children, not descendants
+- Safely handles `nil` nodes (returns `nil`)
+- Filters out `nil` children automatically
+- Different node types have different child structures
+
+**Example:**
+
+```go
+import (
+    "fmt"
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+    "github.com/mnafees/pgvet/walker"
+)
+
+func printImmediateChildren(node *pg_query.Node, depth int) {
+    indent := strings.Repeat("  ", depth)
+    fmt.Printf("%sNode: %T\n", indent, node.Node)
+    
+    children := walker.Children(node)
+    fmt.Printf("%s  Children: %d\n", indent, len(children))
+    
+    for _, child := range children {
+        fmt.Printf("%s  - %T\n", indent, child.Node)
+    }
+}
+```
+
+## Supported Node Types
+
+The `Children` function supports extracting child nodes from these statement types:
+
+### DML Statements
+
+<ResponseField name="SelectStmt" type="*pg_query.SelectStmt">
+  SELECT queries including:
+  - DistinctClause, TargetList (select items)
+  - FromClause (tables/joins)
+  - WhereClause, HavingClause
+  - GroupClause, WindowClause
+  - SortClause (ORDER BY)
+  - LimitOffset, LimitCount
+  - LockingClause (FOR UPDATE)
+  - WithClause (CTEs)
+  - Larg, Rarg (UNION/INTERSECT operands)
+</ResponseField>
+
+<ResponseField name="InsertStmt" type="*pg_query.InsertStmt">
+  INSERT statements including:
+  - Relation (target table)
+  - Cols (column list)
+  - SelectStmt (VALUES or SELECT)
+  - ReturningList
+  - WithClause (CTEs)
+</ResponseField>
+
+<ResponseField name="UpdateStmt" type="*pg_query.UpdateStmt">
+  UPDATE statements including:
+  - Relation (target table)
+  - TargetList (SET clauses)
+  - WhereClause
+  - FromClause
+  - ReturningList
+  - WithClause (CTEs)
+</ResponseField>
+
+<ResponseField name="DeleteStmt" type="*pg_query.DeleteStmt">
+  DELETE statements including:
+  - Relation (target table)
+  - UsingClause
+  - WhereClause
+  - ReturningList
+  - WithClause (CTEs)
+</ResponseField>
+
+### Expression Nodes
+
+<ResponseField name="JoinExpr" type="*pg_query.JoinExpr">
+  Table joins including:
+  - Larg, Rarg (left/right operands)
+  - Quals (ON condition)
+  - UsingClause
+</ResponseField>
+
+<ResponseField name="BoolExpr" type="*pg_query.BoolExpr">
+  Boolean expressions (AND, OR, NOT):
+  - Args (operands)
+</ResponseField>
+
+<ResponseField name="AExpr" type="*pg_query.AExpr">
+  Binary expressions (=, &lt;, &gt;, LIKE, etc.):
+  - Lexpr, Rexpr (left/right operands)
+  - Name (operator name)
+</ResponseField>
+
+<ResponseField name="FuncCall" type="*pg_query.FuncCall">
+  Function calls including:
+  - Funcname (function name parts)
+  - Args (function arguments)
+  - AggOrder (ORDER BY in aggregates)
+  - AggFilter (FILTER clause)
+</ResponseField>
+
+<ResponseField name="CaseExpr" type="*pg_query.CaseExpr">
+  CASE expressions:
+  - Arg (case operand)
+  - Args (WHEN clauses)
+  - Defresult (ELSE clause)
+</ResponseField>
+
+<ResponseField name="CaseWhen" type="*pg_query.CaseWhen">
+  CASE WHEN clauses:
+  - Expr (condition)
+  - Result (result value)
+</ResponseField>
+
+<ResponseField name="SubLink" type="*pg_query.SubLink">
+  Subqueries (IN, EXISTS, etc.):
+  - Testexpr (left side of comparison)
+  - Subselect (subquery)
+</ResponseField>
+
+<ResponseField name="CoalesceExpr" type="*pg_query.CoalesceExpr">
+  COALESCE expressions:
+  - Args (arguments)
+</ResponseField>
+
+<ResponseField name="NullTest" type="*pg_query.NullTest">
+  IS NULL / IS NOT NULL:
+  - Arg (tested expression)
+</ResponseField>
+
+### Other Nodes
+
+<ResponseField name="CommonTableExpr" type="*pg_query.CommonTableExpr">
+  CTEs (WITH clauses):
+  - Ctequery (CTE query)
+  - Aliascolnames (column aliases)
+</ResponseField>
+
+<ResponseField name="RangeSubselect" type="*pg_query.RangeSubselect">
+  Subqueries in FROM:
+  - Subquery (the SELECT)
+</ResponseField>
+
+<ResponseField name="ResTarget" type="*pg_query.ResTarget">
+  SELECT list items / SET targets:
+  - Val (value expression)
+  - Indirection (array subscripts, field access)
+</ResponseField>
+
+<ResponseField name="ColumnRef" type="*pg_query.ColumnRef">
+  Column references:
+  - Fields (schema.table.column parts)
+</ResponseField>
+
+<ResponseField name="TypeCast" type="*pg_query.TypeCast">
+  Type casts (::type):
+  - Arg (casted expression)
+</ResponseField>
+
+<ResponseField name="SortBy" type="*pg_query.SortBy">
+  ORDER BY items:
+  - Node (sorted expression)
+  - UseOp (custom sort operator)
+</ResponseField>
+
+<ResponseField name="List" type="*pg_query.List">
+  Generic node lists:
+  - Items (list elements)
+</ResponseField>
+
+<ResponseField name="RowExpr" type="*pg_query.RowExpr">
+  ROW constructors:
+  - Args (row values)
+</ResponseField>
+
+<ResponseField name="MinMaxExpr" type="*pg_query.MinMaxExpr">
+  GREATEST/LEAST:
+  - Args (arguments)
+</ResponseField>
+
+<ResponseField name="XmlExpr" type="*pg_query.XmlExpr">
+  XML functions:
+  - NamedArgs, Args
+</ResponseField>
+
+<ResponseField name="GroupingFunc" type="*pg_query.GroupingFunc">
+  GROUPING function:
+  - Args (arguments)
+</ResponseField>
+
+<ResponseField name="LockingClause" type="*pg_query.LockingClause">
+  FOR UPDATE/SHARE:
+  - LockedRels (locked tables)
+</ResponseField>
+
+## Complete Example: Find Unindexed LIKE Patterns
+
+Here's a realistic example that finds LIKE patterns starting with wildcards (which can't use indexes):
+
+```go
+package main
+
+import (
+    "fmt"
+    "strings"
+    
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+    "github.com/mnafees/pgvet/rule"
+    "github.com/mnafees/pgvet/walker"
+)
+
+type LikeStartsWithWildcard struct{}
+
+func (r *LikeStartsWithWildcard) Name() string {
+    return "like-starts-with-wildcard"
+}
+
+func (r *LikeStartsWithWildcard) Description() string {
+    return "LIKE pattern starting with % or _ cannot use index"
+}
+
+func (r *LikeStartsWithWildcard) Check(stmt *pg_query.RawStmt, sql string) []rule.Diagnostic {
+    var diags []rule.Diagnostic
+    
+    walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+        // Look for expressions
+        expr := node.GetAExpr()
+        if expr == nil {
+            return true
+        }
+        
+        // Check if it's a LIKE operator
+        if len(expr.Name) == 0 {
+            return true
+        }
+        opName := expr.Name[0].GetString_()
+        if opName == nil || (opName.Sval != "~~" && opName.Sval != "~~*") {
+            return true
+        }
+        
+        // Check the pattern (right side)
+        if expr.Rexpr == nil {
+            return true
+        }
+        pattern := expr.Rexpr.GetAConst()
+        if pattern == nil {
+            return true
+        }
+        strVal := pattern.GetSval()
+        if strVal == nil {
+            return true
+        }
+        
+        // Check if starts with wildcard
+        val := strVal.GetSval()
+        if strings.HasPrefix(val, "%") || strings.HasPrefix(val, "_") {
+            line, col := offsetToLineCol(sql, int(stmt.StmtLocation))
+            diags = append(diags, rule.Diagnostic{
+                Rule:     r.Name(),
+                Message:  r.Description(),
+                Line:     line,
+                Col:      col,
+                Severity: rule.SeverityWarning,
+            })
+            return false  // Found it, stop searching
+        }
+        
+        return true
+    })
+    
+    return diags
+}
+```
+
+## Best Practices
+
+1. **Return early**: Return `false` from visitor when you've found what you need
+2. **Check for nil**: Always check if node getters return `nil` before accessing fields
+3. **Use Walk for deep search**: Use `Walk` when you need to search the entire tree
+4. **Use Children for direct access**: Use `Children` when you only need immediate children
+5. **Combine with type assertions**: Use node getter methods to access specific node types
+
+## See Also
+
+- [Rule Interface](/api/rule-interface) - Implement custom rules
+- [Analyzer](/api/analyzer) - Run rules against SQL files
+- [pg_query_go](https://github.com/pganalyze/pg_query_go) - PostgreSQL parser library

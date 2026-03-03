@@ -1,0 +1,353 @@
+---
+title: Troubleshooting
+description: Common issues and solutions when using pgvet
+---
+
+This guide covers common problems you might encounter with pgvet and how to resolve them.
+
+## Installation Issues
+
+### CGO Compilation Errors
+
+pgvet depends on [pg_query_go](https://github.com/pganalyze/pg_query_go), which uses CGO to link against the PostgreSQL parser. If you're building from source, you might encounter:
+
+```
+# github.com/pganalyze/pg_query_go/v6/parser
+gcc: error: libpg_query.a: No such file or directory
+```
+
+**Solution**: Ensure you have a C compiler and build tools installed:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install build-essential
+
+# macOS
+xcode-select --install
+
+# Alpine Linux
+apk add build-base
+```
+
+If errors persist, try:
+
+```bash
+# Clear Go module cache
+go clean -modcache
+
+# Rebuild
+go build -v
+```
+
+### Binary Not Found After Installation
+
+If `pgvet` command is not found after `go install`:
+
+```bash
+# Check if $GOPATH/bin is in your PATH
+echo $PATH | grep -q "$(go env GOPATH)/bin" || echo "GOPATH/bin not in PATH"
+
+# Add to PATH (add to ~/.bashrc or ~/.zshrc for persistence)
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+### Permission Denied on Linux
+
+If you downloaded the pre-built binary:
+
+```bash
+chmod +x pgvet-linux-amd64
+sudo mv pgvet-linux-amd64 /usr/local/bin/pgvet
+```
+
+## Parse Errors
+
+### Invalid SQL Syntax
+
+When pgvet encounters SQL it can't parse:
+
+```
+error: syntax error at or near "FRON"
+```
+
+**Cause**: pgvet uses the PostgreSQL parser, which requires valid SQL syntax.
+
+**Solution**: Fix the syntax error in your SQL file. pgvet will show the line and column where parsing failed.
+
+### Unsupported PostgreSQL Dialect
+
+pgvet uses PostgreSQL syntax. If you're using MySQL, SQLite, or other database dialects:
+
+```
+error: syntax error at or near "LIMIT 10 OFFSET 5"
+```
+
+**Solution**: pgvet only supports PostgreSQL. For other databases, you'll need alternative tools:
+- MySQL: [mysqlcheck](https://dev.mysql.com/doc/refman/8.0/en/mysqlcheck.html)
+- SQLite: [sqlcheck](https://github.com/jarulraj/sqlcheck)
+
+### Placeholders and Parameters
+
+pgvet supports PostgreSQL-style placeholders (`$1`, `$2`, etc.):
+
+```sql
+-- ✓ Supported
+SELECT * FROM users WHERE id = $1;
+
+-- ✗ Not supported (use $1 instead)
+SELECT * FROM users WHERE id = ?;
+```
+
+### Dynamic SQL
+
+For dynamically generated SQL (e.g., from ORMs), pgvet can only analyze static SQL strings:
+
+```go
+// ✓ Can be analyzed
+const query = "SELECT * FROM users WHERE active = true"
+
+// ✗ Cannot be analyzed (dynamic)
+query := fmt.Sprintf("SELECT * FROM %s", tableName)
+```
+
+**Solution**: Extract static SQL to `.sql` files or use query builders that generate static queries.
+
+## Performance Issues
+
+### Slow Analysis on Large Codebases
+
+For projects with thousands of SQL files:
+
+**1. Analyze only changed files in CI:**
+
+```bash
+# Get changed SQL files from git
+git diff --name-only --diff-filter=ACM origin/main | grep '\.sql$' | xargs pgvet
+```
+
+**2. Use parallel processing:**
+
+```bash
+# GNU parallel
+find sql/ -name '*.sql' | parallel -j8 pgvet {}
+
+# xargs
+find sql/ -name '*.sql' | xargs -P8 -n10 pgvet
+```
+
+**3. Exclude rules you don't need:**
+
+```bash
+# Only run error-level rules
+pgvet --rules not-in-subquery,update-without-where sql/
+```
+
+### High Memory Usage
+
+Each SQL file is parsed into an AST in memory. For very large files:
+
+**Solution**: Split large migration files into smaller chunks:
+
+```bash
+# Split a 10MB migration into 1MB chunks
+split -b 1m large_migration.sql migration_part_
+```
+
+## Rule-Specific Issues
+
+### False Positives
+
+If a rule flags valid code:
+
+**Option 1: Disable the rule globally**
+
+```bash
+pgvet --exclude select-star sql/
+```
+
+**Option 2: Disable for specific files**
+
+Currently, pgvet doesn't support inline comments to disable rules. Track this feature request: [GitHub issue #XX]
+
+Workaround: Organize SQL files by purpose and run different rule sets:
+
+```bash
+# Strict rules for application queries
+pgvet --rules all queries/
+
+# Relaxed rules for migrations
+pgvet --exclude select-star,order-by-ordinal migrations/
+```
+
+### Understanding Rule Violations
+
+For detailed explanations of why a rule exists, see the [Rules Reference](/rules/overview). Each rule page includes:
+
+- Why the pattern is problematic
+- Examples of violations
+- How to fix the issue
+- When it's safe to ignore
+
+## Output Issues
+
+### JSON Output is Empty
+
+If `--format json` produces `[]`:
+
+```bash
+pgvet --format json sql/ > results.json
+cat results.json
+# []
+```
+
+**Cause**: No issues were found (exit code 0).
+
+**Verify**: Check the exit code:
+
+```bash
+pgvet --format json sql/
+echo $?  # 0 = no issues, 1 = issues found, 2 = error
+```
+
+### Text Output Not Showing Colors
+
+If colors are missing in terminal output:
+
+**Solution**: Ensure your terminal supports ANSI colors. Colors are automatically disabled when output is piped:
+
+```bash
+# Colors enabled (terminal output)
+pgvet sql/
+
+# Colors disabled (piped to file)
+pgvet sql/ > output.txt
+```
+
+## CI/CD Issues
+
+### Build Failing with Exit Code 2
+
+Exit code 2 indicates a fatal error (not an SQL issue):
+
+**Common causes:**
+
+1. **File not found:**
+   ```bash
+   # Check that paths exist
+   ls -la sql/
+   ```
+
+2. **Permission denied:**
+   ```bash
+   # Ensure CI user can read SQL files
+   chmod -R 644 sql/
+   ```
+
+3. **Invalid flags:**
+   ```bash
+   # Verify flag syntax
+   pgvet --help
+   ```
+
+### Warnings Causing Build Failure
+
+If you only want errors to fail the build:
+
+```bash
+pgvet --format json sql/ > results.json
+error_count=$(jq '[.[] | select(.severity == "error")] | length' results.json)
+
+if [ "$error_count" -gt 0 ]; then
+    exit 1
+fi
+```
+
+See [CI Integration](/advanced/ci-integration) for complete examples.
+
+### CGO_ENABLED=0 Build Failures
+
+Static binaries without CGO won't work because pg_query_go requires CGO:
+
+```bash
+# ✗ Will fail
+CGO_ENABLED=0 go build
+
+# ✓ Use CGO (required)
+CGO_ENABLED=1 go build
+```
+
+**For Docker**: Use a multi-stage build with build tools in the first stage:
+
+```dockerfile
+# Build stage
+FROM golang:1.21 AS builder
+RUN apt-get update && apt-get install -y build-essential
+WORKDIR /app
+COPY . .
+RUN CGO_ENABLED=1 go build -o pgvet
+
+# Runtime stage
+FROM ubuntu:22.04
+COPY --from=builder /app/pgvet /usr/local/bin/
+ENTRYPOINT ["pgvet"]
+```
+
+## Getting Help
+
+If you're still stuck:
+
+1. **Check existing issues**: [github.com/mnafees/pgvet/issues](https://github.com/mnafees/pgvet/issues)
+2. **Search discussions**: [github.com/mnafees/pgvet/discussions](https://github.com/mnafees/pgvet/discussions)
+3. **Open a new issue**: Include:
+   - pgvet version (`pgvet --version`)
+   - Go version (`go version`)
+   - Operating system
+   - Full error message or output
+   - Minimal SQL example that reproduces the issue
+
+## Debugging Tips
+
+### Enable Verbose Output
+
+While pgvet doesn't have a `--verbose` flag, you can debug by:
+
+```bash
+# Run on a single file to isolate issues
+pgvet single_file.sql
+
+# Check if specific rules are the problem
+pgvet --rules select-star single_file.sql
+```
+
+### Validate SQL Separately
+
+Test if your SQL parses correctly:
+
+```bash
+# Using psql
+psql -d postgres -c "$(cat your_query.sql)" --dry-run
+
+# Or use pg_query parser directly
+go run github.com/pganalyze/pg_query_go/v6/cmd/pg_query@latest < your_query.sql
+```
+
+### Check File Encoding
+
+pgvet expects UTF-8 encoded files. If you have encoding issues:
+
+```bash
+# Check file encoding
+file -i your_file.sql
+
+# Convert to UTF-8 if needed
+iconv -f ISO-8859-1 -t UTF-8 your_file.sql > your_file_utf8.sql
+```
+
+## Known Limitations
+
+- **No inline rule disabling**: You can't disable rules per-line or per-file using comments
+- **PostgreSQL only**: Other SQL dialects (MySQL, SQLite, etc.) are not supported
+- **Static analysis only**: Cannot analyze dynamically constructed SQL
+- **CGO required**: Cannot build fully static binaries
+
+These limitations are tracked in the [GitHub roadmap](https://github.com/mnafees/pgvet/issues).

@@ -1,0 +1,301 @@
+---
+title: Ordinal Position Warnings
+description: Rules that detect fragile ordinal positions in ORDER BY and GROUP BY
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+These rules flag the use of ordinal positions (column numbers like `1`, `2`, `3`) in `ORDER BY` and `GROUP BY` clauses. Ordinal positions are fragile and break when column lists change.
+
+**Rules covered**:
+- `order-by-ordinal`: Flags `ORDER BY 1`, `ORDER BY 2`, etc.
+- `group-by-ordinal`: Flags `GROUP BY 1`, `GROUP BY 2`, etc.
+
+**Default severity**: Warning
+
+---
+
+## order-by-ordinal
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `ORDER BY` uses numeric positions: `ORDER BY 1`, `ORDER BY 1, 2`, etc.
+
+The rule **does not** trigger when:
+
+- `ORDER BY` uses column names or expressions
+- No `ORDER BY` clause is present
+
+### Why It Matters
+
+#### Fragility to Column Changes
+
+Ordinal positions in `ORDER BY` refer to columns by their position in the `SELECT` list:
+
+```sql
+-- This query orders by the first selected column
+SELECT id, name FROM users ORDER BY 1;
+-- Equivalent to: ORDER BY id
+```
+
+The problem: if you reorder the `SELECT` list, the `ORDER BY` behavior silently changes:
+
+```sql
+-- Someone swaps the column order
+SELECT name, id FROM users ORDER BY 1;
+-- Now it orders by name instead of id!
+```
+
+#### Problems This Causes
+
+1. **Silent breakage**: Query still runs but produces different results
+2. **Hard to review**: Code reviewers don't immediately see what column is being sorted
+3. **Refactoring hazards**: Adding/removing/reordering SELECT columns breaks ORDER BY
+4. **Poor readability**: `ORDER BY 2, 3, 1` is unclear without looking at SELECT list
+
+### Better Alternative: Use Column Names
+
+Always use explicit column names or expressions:
+
+```sql
+-- Bad: fragile to column order changes
+SELECT id, name FROM users ORDER BY 1;
+
+-- Good: explicit and robust
+SELECT id, name FROM users ORDER BY id;
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: ORDER BY 1">
+    ```sql
+    SELECT id, name FROM users ORDER BY 1
+    ```
+    
+    **Issue**: Sorts by the first column (`id`). If columns are reordered, behavior changes.
+  </Accordion>
+
+  <Accordion title="Problematic: ORDER BY 1, 2">
+    ```sql
+    SELECT id, name FROM users ORDER BY 1, 2
+    ```
+    
+    **Issue**: Multiple ordinal positions are even harder to understand and maintain.
+  </Accordion>
+
+  <Accordion title="Good: ORDER BY column name">
+    ```sql
+    SELECT id, name FROM users ORDER BY id
+    ```
+    
+    **Why it's better**: Explicit, clear intent, robust to SELECT list changes.
+  </Accordion>
+
+  <Accordion title="Good: ORDER BY multiple columns">
+    ```sql
+    SELECT id, name FROM users ORDER BY name, id
+    ```
+    
+    **Why it's better**: Readers immediately understand the sort order.
+  </Accordion>
+
+  <Accordion title="Good: ORDER BY expression">
+    ```sql
+    SELECT id, name FROM users ORDER BY lower(name)
+    ```
+    
+    **Why it's better**: Can sort by expressions not in the SELECT list.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## group-by-ordinal
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `GROUP BY` uses numeric positions: `GROUP BY 1`, `GROUP BY 1, 2`, etc.
+
+The rule **does not** trigger when:
+
+- `GROUP BY` uses column names or expressions
+- No `GROUP BY` clause is present
+
+### Why It Matters
+
+#### Same Issues as ORDER BY
+
+Ordinal positions in `GROUP BY` have the same problems as in `ORDER BY`:
+
+```sql
+-- Groups by the first selected column
+SELECT status, count(*) FROM users GROUP BY 1;
+-- Equivalent to: GROUP BY status
+
+-- If SELECT columns are reordered:
+SELECT count(*), status FROM users GROUP BY 1;
+-- Now groups by count(*) — which is wrong!
+```
+
+#### GROUP BY is More Critical
+
+With `GROUP BY`, ordinal position mistakes can cause:
+
+1. **Wrong aggregations**: Grouping by the wrong column produces incorrect counts/sums
+2. **Runtime errors**: Grouping by an aggregate function (like `count(*)`) causes errors
+3. **Subtle data bugs**: Incorrect groups may not be immediately obvious
+
+### Better Alternative: Use Column Names
+
+Always use explicit column names or expressions:
+
+```sql
+-- Bad: fragile and unclear
+SELECT status, count(*) FROM users GROUP BY 1;
+
+-- Good: explicit and robust
+SELECT status, count(*) FROM users GROUP BY status;
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: GROUP BY 1">
+    ```sql
+    SELECT status, count(*) FROM users GROUP BY 1
+    ```
+    
+    **Issue**: Groups by the first column (`status`). Fragile to SELECT list changes.
+  </Accordion>
+
+  <Accordion title="Problematic: GROUP BY 1, 2">
+    ```sql
+    SELECT a, b, count(*) FROM t GROUP BY 1, 2
+    ```
+    
+    **Issue**: Unclear which columns are being grouped. Hard to verify correctness.
+  </Accordion>
+
+  <Accordion title="Good: GROUP BY column name">
+    ```sql
+    SELECT status, count(*) FROM users GROUP BY status
+    ```
+    
+    **Why it's better**: Explicit, clear, robust to SELECT list changes.
+  </Accordion>
+
+  <Accordion title="Good: GROUP BY multiple columns">
+    ```sql
+    SELECT status, role, count(*) FROM users GROUP BY status, role
+    ```
+    
+    **Why it's better**: Immediately clear what the grouping is.
+  </Accordion>
+
+  <Accordion title="Good: GROUP BY expression">
+    ```sql
+    SELECT date_trunc('day', created_at) AS day, count(*) 
+    FROM orders 
+    GROUP BY date_trunc('day', created_at)
+    ```
+    
+    **Why it's better**: Explicit grouping by expression. Can use the alias `day` in some databases, but expression is clearer.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Historical Context
+
+### Why Do Ordinals Exist?
+
+Ordinal positions in `ORDER BY` and `GROUP BY` come from early SQL standards when:
+
+- Column names weren't always available (especially for computed columns)
+- Typing was minimized (important on slow terminals)
+- SQL was often generated by tools, not written by hand
+
+### Modern Alternatives
+
+Today, better alternatives exist:
+
+- **Column aliases**: Give expressions names with `AS`
+- **Repeat expressions**: Modern optimizers handle repeated expressions efficiently
+- **Readability over brevity**: Explicit code is better than terse code
+
+```sql
+-- Old style (using ordinals)
+SELECT date_trunc('month', created_at), count(*) 
+FROM orders 
+GROUP BY 1 
+ORDER BY 1;
+
+-- Modern style (using aliases)
+SELECT date_trunc('month', created_at) AS month, count(*) AS total
+FROM orders 
+GROUP BY date_trunc('month', created_at)
+ORDER BY month;
+
+-- Or even clearer (PostgreSQL allows GROUP BY alias)
+SELECT date_trunc('month', created_at) AS month, count(*) AS total
+FROM orders 
+GROUP BY month
+ORDER BY month;
+```
+
+---
+
+## Implementation Details
+
+### order-by-ordinal
+
+The rule works by:
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Iterating through `SortClause` (ORDER BY) items
+3. Checking if each `SortBy` node contains an `A_Const` with an integer value
+4. Reporting a warning at the location of the ordinal
+
+Implementation: [`order_by_ordinal.go`](https://github.com/mnafees/pgvet/blob/main/rule/order_by_ordinal.go)
+
+### group-by-ordinal
+
+The rule works by:
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Iterating through `GroupClause` (GROUP BY) items
+3. Checking if each item is an `A_Const` node with an integer value
+4. Reporting a warning at the location of the ordinal
+
+Implementation: [`group_by_ordinal.go`](https://github.com/mnafees/pgvet/blob/main/rule/group_by_ordinal.go)
+
+---
+
+## How to Disable
+
+You can disable these rules in your pgvet configuration:
+
+```yaml
+rules:
+  order-by-ordinal:
+    enabled: false
+  group-by-ordinal:
+    enabled: false
+```
+
+Or disable them for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore order-by-ordinal
+SELECT id, name FROM users ORDER BY 1;
+
+-- pgvet: ignore group-by-ordinal
+SELECT status, count(*) FROM users GROUP BY 1;
+```

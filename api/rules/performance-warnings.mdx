@@ -1,0 +1,571 @@
+---
+title: Performance Warnings
+description: Rules that detect common SQL performance anti-patterns
+---
+
+<Warning>
+**Severity**: Warning
+</Warning>
+
+## Overview
+
+These rules flag SQL patterns that can cause performance problems, lock contention, or inefficient query execution. They help you write faster, more scalable queries.
+
+**Rules covered**:
+- `for-update-no-skip`: Flags `FOR UPDATE` without `SKIP LOCKED` or `NOWAIT`
+- `distinct-on-order`: Flags `DISTINCT ON` without matching `ORDER BY`
+- `like-starts-with-wildcard`: Flags `LIKE` patterns starting with `%`
+- `offset-without-limit`: Flags `OFFSET` without `LIMIT`
+
+**Default severity**: Warning
+
+---
+
+## for-update-no-skip
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `FOR UPDATE` is used without `SKIP LOCKED` or `NOWAIT`
+- `FOR NO KEY UPDATE` is used without `SKIP LOCKED` or `NOWAIT`
+
+The rule **does not** trigger when:
+
+- `FOR UPDATE SKIP LOCKED` is used
+- `FOR UPDATE NOWAIT` is used
+- `FOR SHARE` or `FOR KEY SHARE` is used (non-exclusive locks)
+- No locking clause is present
+
+### Why It Matters
+
+#### Lock Contention
+
+By default, `FOR UPDATE` **blocks** if another transaction holds a lock on any of the rows:
+
+```sql
+-- Transaction 1
+SELECT * FROM items WHERE id = 1 FOR UPDATE;
+-- Acquires lock on row 1
+
+-- Transaction 2 (running concurrently)
+SELECT * FROM items WHERE id = 1 FOR UPDATE;
+-- BLOCKS waiting for Transaction 1 to commit/rollback
+```
+
+This blocking can cause:
+
+1. **Slow response times**: Users wait for locks to be released
+2. **Deadlocks**: Two transactions wait for each other's locks
+3. **Cascade delays**: One slow transaction blocks many others
+4. **Timeout errors**: Connections time out waiting for locks
+
+### Better Alternatives
+
+#### Use SKIP LOCKED for Queue Processing
+
+When processing work items from a queue, use `SKIP LOCKED` to skip locked rows:
+
+```sql
+-- Each worker picks up unlocked items, never blocks
+SELECT * FROM tasks 
+WHERE status = 'pending' 
+ORDER BY priority DESC
+LIMIT 10
+FOR UPDATE SKIP LOCKED;
+```
+
+**Benefits**:
+- Workers never wait for each other
+- High concurrency without lock contention
+- Each worker processes different items
+
+#### Use NOWAIT for Fail-Fast Behavior
+
+When you can't wait for a lock, use `NOWAIT` to get an immediate error:
+
+```sql
+-- Try to lock the row, fail immediately if locked
+SELECT * FROM accounts WHERE id = 123 FOR UPDATE NOWAIT;
+-- Throws error if row is already locked
+```
+
+**Benefits**:
+- Immediate feedback instead of hanging
+- Application can retry or show error to user
+- Prevents cascade blocking
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: FOR UPDATE without SKIP LOCKED">
+    ```sql
+    SELECT id FROM items ORDER BY id FOR UPDATE
+    ```
+    
+    **Issue**: Blocks if any row is locked by another transaction. Can cause cascading delays.
+  </Accordion>
+
+  <Accordion title="Good: FOR UPDATE SKIP LOCKED">
+    ```sql
+    SELECT id FROM items ORDER BY id FOR UPDATE SKIP LOCKED
+    ```
+    
+    **Why it's better**: Skips locked rows, never blocks, perfect for job queues.
+  </Accordion>
+
+  <Accordion title="Good: FOR UPDATE NOWAIT">
+    ```sql
+    SELECT id FROM items ORDER BY id FOR UPDATE NOWAIT
+    ```
+    
+    **Why it's better**: Fails immediately if locked, application can handle the error.
+  </Accordion>
+
+  <Accordion title="Allowed: FOR SHARE (non-exclusive)">
+    ```sql
+    SELECT id FROM items WHERE id = 1 FOR SHARE
+    ```
+    
+    **Why it's allowed**: `FOR SHARE` allows concurrent reads, less prone to contention.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## distinct-on-order
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `DISTINCT ON (...)` is used without any `ORDER BY`
+- `DISTINCT ON (...)` is used with `ORDER BY` but the leading columns don't match
+
+The rule **does not** trigger when:
+
+- Plain `DISTINCT` (no `ON`) is used
+- `DISTINCT ON` has a matching `ORDER BY` that starts with the same columns
+
+### Why It Matters
+
+#### Non-Deterministic Row Selection
+
+`DISTINCT ON (col)` keeps the "first" row for each distinct value of `col`. But without `ORDER BY`, "first" is arbitrary:
+
+```sql
+-- Which employee from each department? Arbitrary!
+SELECT DISTINCT ON (dept_id) dept_id, name, salary
+FROM employees;
+-- Returns one employee per department, but which one? Unknown!
+```
+
+Each execution may return different rows, leading to:
+
+1. **Non-reproducible results**: Different answers each time
+2. **Flaky tests**: Tests pass/fail randomly
+3. **User confusion**: Data changes unpredictably
+4. **Hidden bugs**: Incorrect assumptions about which row is selected
+
+#### ORDER BY Must Match DISTINCT ON
+
+For deterministic results, `ORDER BY` must start with the `DISTINCT ON` columns:
+
+```sql
+-- Correct: ORDER BY starts with dept_id (the DISTINCT ON column)
+SELECT DISTINCT ON (dept_id) dept_id, name, salary
+FROM employees
+ORDER BY dept_id, salary DESC;
+-- Returns the highest-paid employee from each department (deterministic)
+```
+
+If `ORDER BY` doesn't match, results are still non-deterministic:
+
+```sql
+-- Wrong: ORDER BY doesn't start with dept_id
+SELECT DISTINCT ON (dept_id) dept_id, name, salary
+FROM employees
+ORDER BY name;
+-- Non-deterministic! Which employee if multiple have same name?
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: DISTINCT ON without ORDER BY">
+    ```sql
+    SELECT DISTINCT ON (dept_id) dept_id, name FROM employees
+    ```
+    
+    **Issue**: Returns an arbitrary employee from each department. Results vary across executions.
+  </Accordion>
+
+  <Accordion title="Problematic: DISTINCT ON with non-matching ORDER BY">
+    ```sql
+    SELECT DISTINCT ON (dept_id) dept_id, name FROM employees ORDER BY name
+    ```
+    
+    **Issue**: ORDER BY doesn't start with `dept_id`. Results are non-deterministic.
+  </Accordion>
+
+  <Accordion title="Good: DISTINCT ON with matching ORDER BY">
+    ```sql
+    SELECT DISTINCT ON (dept_id) dept_id, name FROM employees 
+    ORDER BY dept_id, salary DESC
+    ```
+    
+    **Why it's better**: Returns the highest-paid employee from each department. Deterministic and clear.
+  </Accordion>
+
+  <Accordion title="Allowed: Plain DISTINCT">
+    ```sql
+    SELECT DISTINCT status FROM orders
+    ```
+    
+    **Why it's allowed**: Plain `DISTINCT` just removes duplicates. ORDER BY isn't required.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## like-starts-with-wildcard
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `LIKE` pattern starts with `%`: `LIKE '%foo'` or `LIKE '%foo%'`
+- `ILIKE` pattern starts with `%`: `ILIKE '%foo'` or `ILIKE '%foo%'`
+
+The rule **does not** trigger when:
+
+- Pattern has `%` only at the end: `LIKE 'foo%'`
+- Pattern has no wildcards: `LIKE 'foo'`
+- Other comparison operators are used
+
+### Why It Matters
+
+#### Index Can't Be Used
+
+When a `LIKE` pattern starts with `%`, PostgreSQL **cannot use a B-tree index**:
+
+```sql
+-- Index on name exists
+CREATE INDEX idx_name ON users (name);
+
+-- Index CAN be used (prefix match)
+SELECT * FROM users WHERE name LIKE 'John%';
+-- Uses index to find names starting with 'John'
+
+-- Index CANNOT be used (leading wildcard)
+SELECT * FROM users WHERE name LIKE '%John';
+-- Full table scan — checks every row
+```
+
+#### Performance Impact
+
+Without an index, the query must:
+
+1. **Scan every row** in the table (sequential scan)
+2. **Check every row** against the pattern
+3. **Scale linearly** with table size (O(n))
+
+For large tables, this can be catastrophically slow.
+
+### Better Alternatives
+
+#### Use Suffix Match When Possible
+
+If you're searching for prefixes, put the wildcard at the end:
+
+```sql
+-- Slow: leading wildcard, no index
+SELECT * FROM users WHERE name LIKE '%test';
+
+-- Fast: trailing wildcard, uses index
+SELECT * FROM users WHERE name LIKE 'test%';
+```
+
+#### Use Full-Text Search for Complex Patterns
+
+For searching within text, use PostgreSQL's full-text search:
+
+```sql
+-- Create a full-text search index
+CREATE INDEX idx_name_fts ON users USING GIN (to_tsvector('english', name));
+
+-- Fast full-text search
+SELECT * FROM users WHERE to_tsvector('english', name) @@ to_tsquery('John');
+```
+
+#### Use Trigram Indexes for Substring Search
+
+For substring searches, use the `pg_trgm` extension with GIN or GiST indexes:
+
+```sql
+-- Enable pg_trgm extension
+CREATE EXTENSION pg_trgm;
+
+-- Create trigram index
+CREATE INDEX idx_name_trgm ON users USING GIN (name gin_trgm_ops);
+
+-- Now leading wildcard can use the index
+SELECT * FROM users WHERE name LIKE '%John%';
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: LIKE with leading %">
+    ```sql
+    SELECT * FROM users WHERE name LIKE '%test'
+    ```
+    
+    **Issue**: Cannot use B-tree index. Full table scan on every query.
+  </Accordion>
+
+  <Accordion title="Problematic: ILIKE with leading %">
+    ```sql
+    SELECT * FROM users WHERE name ILIKE '%test'
+    ```
+    
+    **Issue**: Same problem. Case-insensitive search with leading wildcard.
+  </Accordion>
+
+  <Accordion title="Problematic: LIKE with leading and trailing %">
+    ```sql
+    SELECT * FROM users WHERE name LIKE '%test%'
+    ```
+    
+    **Issue**: Leading `%` prevents index usage, even though trailing `%` is present.
+  </Accordion>
+
+  <Accordion title="Good: LIKE with trailing % only">
+    ```sql
+    SELECT * FROM users WHERE name LIKE 'test%'
+    ```
+    
+    **Why it's better**: Can use B-tree index for efficient prefix search.
+  </Accordion>
+
+  <Accordion title="Good: Exact LIKE">
+    ```sql
+    SELECT * FROM users WHERE name LIKE 'test'
+    ```
+    
+    **Why it's better**: Can use index. Though `= 'test'` would be clearer.
+  </Accordion>
+
+  <Accordion title="Good: Full-text search">
+    ```sql
+    SELECT * FROM users WHERE to_tsvector('english', name) @@ to_tsquery('test')
+    ```
+    
+    **Why it's better**: Uses GIN index, fast full-text search, handles stemming.
+  </Accordion>
+
+  <Accordion title="Good: Trigram index for substring">
+    ```sql
+    -- With pg_trgm and GIN index
+    SELECT * FROM users WHERE name LIKE '%test%'
+    ```
+    
+    **Why it works**: Trigram index makes substring searches efficient.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## offset-without-limit
+
+### When This Rule Triggers
+
+This rule triggers when:
+
+- `OFFSET` is used without `LIMIT`
+
+The rule **does not** trigger when:
+
+- `OFFSET` is used with `LIMIT`
+- `LIMIT` is used without `OFFSET`
+- Neither `OFFSET` nor `LIMIT` is present
+
+### Why It Matters
+
+#### Returns All Remaining Rows
+
+`OFFSET n` skips the first `n` rows, then returns **all remaining rows**:
+
+```sql
+-- Table has 1 million rows
+SELECT * FROM orders OFFSET 10;
+-- Skips 10 rows, returns 999,990 rows!
+```
+
+This is almost never the intended behavior and causes:
+
+1. **Massive result sets**: Transferring millions of rows over the network
+2. **Memory exhaustion**: Application runs out of memory
+3. **Slow queries**: Processing huge result sets
+4. **Wasted resources**: Database and network do unnecessary work
+
+#### Likely a Mistake
+
+Using `OFFSET` without `LIMIT` is usually a copy-paste error or misunderstanding:
+
+```sql
+-- Developer meant to write:
+SELECT * FROM orders LIMIT 10 OFFSET 10;
+
+-- But accidentally wrote:
+SELECT * FROM orders OFFSET 10;
+```
+
+### Better Alternatives
+
+#### Always Use LIMIT with OFFSET
+
+For pagination, always specify both:
+
+```sql
+-- Get page 2 (rows 11-20)
+SELECT * FROM orders 
+ORDER BY created_at DESC
+LIMIT 10 OFFSET 10;
+```
+
+#### Consider Keyset Pagination for Large Offsets
+
+For large offsets, `OFFSET` is inefficient because PostgreSQL must still scan all skipped rows. Use keyset pagination instead:
+
+```sql
+-- Bad: inefficient for large offsets
+SELECT * FROM orders ORDER BY id LIMIT 10 OFFSET 10000;
+-- Must scan and skip 10,000 rows!
+
+-- Good: keyset pagination
+SELECT * FROM orders 
+WHERE id > :last_seen_id 
+ORDER BY id 
+LIMIT 10;
+-- Directly seeks to the position, no skipping needed
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Problematic: OFFSET without LIMIT">
+    ```sql
+    SELECT * FROM users OFFSET 10
+    ```
+    
+    **Issue**: Returns all rows after the first 10. Likely returns far more data than intended.
+  </Accordion>
+
+  <Accordion title="Good: OFFSET with LIMIT">
+    ```sql
+    SELECT * FROM users LIMIT 10 OFFSET 5
+    ```
+    
+    **Why it's better**: Returns exactly 10 rows, skipping the first 5. Clear pagination.
+  </Accordion>
+
+  <Accordion title="Good: LIMIT without OFFSET">
+    ```sql
+    SELECT * FROM users LIMIT 10
+    ```
+    
+    **Why it's allowed**: Returns the first 10 rows. No OFFSET needed for the first page.
+  </Accordion>
+
+  <Accordion title="Good: Keyset pagination (no OFFSET)">
+    ```sql
+    SELECT * FROM users 
+    WHERE id > 100 
+    ORDER BY id 
+    LIMIT 10
+    ```
+    
+    **Why it's better**: Efficient pagination for large datasets. No OFFSET needed.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Implementation Details
+
+### for-update-no-skip
+
+The rule works by:
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Iterating through `LockingClause` items
+3. Checking if the lock strength is `FOR UPDATE` or `FOR NO KEY UPDATE`
+4. Checking if `WaitPolicy` is neither `SKIP LOCKED` nor `NOWAIT`
+5. Reporting a warning at the estimated location of `FOR UPDATE`
+
+Implementation: [`for_update_no_skip.go`](https://github.com/mnafees/pgvet/blob/main/rule/for_update_no_skip.go)
+
+### distinct-on-order
+
+The rule works by:
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Checking if `DistinctClause` contains actual expressions (not just plain `DISTINCT`)
+3. Verifying that `SortClause` (ORDER BY) exists
+4. Comparing `DistinctClause` columns with leading `SortClause` columns
+5. Reporting a warning if they don't match
+
+Implementation: [`distinct_on_order.go`](https://github.com/mnafees/pgvet/blob/main/rule/distinct_on_order.go)
+
+### like-starts-with-wildcard
+
+The rule works by:
+1. Walking the SQL AST to find `A_Expr` nodes with `LIKE` or `ILIKE` kind
+2. Extracting the pattern string from the right operand
+3. Checking if the pattern starts with `%`
+4. Reporting a warning at the location of the `LIKE` expression
+
+Implementation: [`like_starts_with_wildcard.go`](https://github.com/mnafees/pgvet/blob/main/rule/like_starts_with_wildcard.go)
+
+### offset-without-limit
+
+The rule works by:
+1. Walking the SQL AST to find `SelectStmt` nodes
+2. Checking if `LimitOffset` is present
+3. Checking if `LimitCount` is absent
+4. Reporting a warning at the location of the `OFFSET` clause
+
+Implementation: [`offset_without_limit.go`](https://github.com/mnafees/pgvet/blob/main/rule/offset_without_limit.go)
+
+---
+
+## How to Disable
+
+You can disable these rules in your pgvet configuration:
+
+```yaml
+rules:
+  for-update-no-skip:
+    enabled: false
+  distinct-on-order:
+    enabled: false
+  like-starts-with-wildcard:
+    enabled: false
+  offset-without-limit:
+    enabled: false
+```
+
+Or disable them for specific queries using inline comments:
+
+```sql
+-- pgvet: ignore for-update-no-skip
+SELECT * FROM items FOR UPDATE;
+
+-- pgvet: ignore distinct-on-order
+SELECT DISTINCT ON (dept_id) * FROM employees;
+
+-- pgvet: ignore like-starts-with-wildcard
+SELECT * FROM users WHERE name LIKE '%test';
+
+-- pgvet: ignore offset-without-limit
+SELECT * FROM orders OFFSET 10;
+```

@@ -1,0 +1,289 @@
+---
+title: Opt-In Rules
+description: Rules that must be explicitly enabled with --rules
+---
+
+Opt-in rules are not enabled by default because they may not apply to all codebases or have specific use cases. You must explicitly enable them using the `--rules` flag.
+
+## multi-statement
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** error  
+    **Name:** `multi-statement`  
+    **Category:** Correctness
+
+    Detects when multiple SQL statements are combined into a single query block (separated by semicolons).
+
+    **Why this is an error:**
+    - CTEs (`WITH` clauses) from the first statement are not visible to subsequent statements
+    - Each statement executes independently, breaking expected scoping
+    - This pattern can silently cause runtime errors
+
+    **When to enable:**
+    - You're extracting SQL from application code where multi-statement blocks shouldn't exist
+    - You're building a query builder or ORM and want to prevent statement concatenation bugs
+    - You've been bitten by CTE scope issues before
+
+    **When NOT to enable:**
+    - Migration files that intentionally batch multiple DDL statements
+    - Admin scripts that combine multiple operations
+    - SQL dumps or schema exports
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Two DELETE statements in one block
+    -- The second statement executes independently
+    DELETE FROM a WHERE id = 1; DELETE FROM b WHERE id = 1;
+    ```
+
+    This produces:
+    ```
+    error: Statement 2 of 2 in a single block — each statement should be separate
+    ```
+
+    ---
+
+    ```sql
+    -- WRONG: Three SELECT statements
+    -- Each executes independently, breaking CTE visibility
+    SELECT 1; SELECT 2; SELECT 3;
+    ```
+
+    This produces:
+    ```
+    error: Statement 2 of 3 in a single block — each statement should be separate
+    error: Statement 3 of 3 in a single block — each statement should be separate
+    ```
+
+    ---
+
+    ```sql
+    -- WRONG: CTE scope doesn't carry over
+    WITH users_to_delete AS (
+      SELECT id FROM users WHERE created_at < NOW() - INTERVAL '1 year'
+    )
+    DELETE FROM users WHERE id IN (SELECT id FROM users_to_delete);
+    
+    -- This statement CANNOT reference the CTE above
+    DELETE FROM orders WHERE user_id IN (SELECT id FROM users_to_delete);
+    ```
+
+    The second `DELETE` will fail at runtime with:
+    ```
+    ERROR: relation "users_to_delete" does not exist
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Single statement
+    SELECT id FROM users WHERE active = true
+    ```
+
+    ---
+
+    ```sql
+    -- CORRECT: Use CTE to combine logic in one statement
+    WITH users_to_delete AS (
+      SELECT id FROM users WHERE created_at < NOW() - INTERVAL '1 year'
+    ),
+    deleted_users AS (
+      DELETE FROM users WHERE id IN (SELECT id FROM users_to_delete)
+      RETURNING id
+    )
+    DELETE FROM orders WHERE user_id IN (SELECT id FROM deleted_users)
+    ```
+
+    ---
+
+    ```sql
+    -- CORRECT: If you must execute multiple statements,
+    -- separate them into different SQL blocks in your application code
+    
+    -- File: cleanup_old_users.sql
+    DELETE FROM users WHERE id IN (
+      SELECT id FROM users WHERE created_at < NOW() - INTERVAL '1 year'
+    )
+    
+    -- File: cleanup_old_orders.sql
+    DELETE FROM orders WHERE user_id NOT IN (SELECT id FROM users)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## How to Enable
+
+Use the `--rules` flag to explicitly enable opt-in rules:
+
+```bash
+pgvet check --rules multi-statement
+```
+
+You can combine this with default rules:
+
+```bash
+# Run all default rules PLUS multi-statement
+pgvet check --rules multi-statement
+
+# Run ONLY multi-statement (disable all defaults)
+pgvet check --rules multi-statement
+```
+
+---
+
+## Implementation Details
+
+The `multi-statement` rule is unique because it operates on the full parse result rather than individual statements:
+
+```go
+// From rule/multi_statement.go
+func (r *MultiStatement) CheckMulti(stmts []*pg_query.RawStmt, sql string) []Diagnostic {
+    if len(stmts) <= 1 {
+        return nil  // Single statement is fine
+    }
+
+    // Flag the second statement onward
+    var diags []Diagnostic
+    for i := 1; i < len(stmts); i++ {
+        loc := int(stmts[i].StmtLocation)
+        line, col := offsetToLineCol(sql, loc)
+        diags = append(diags, Diagnostic{
+            Rule:     r.Name(),
+            Message:  fmt.Sprintf("Statement %d of %d in a single block", i+1, len(stmts)),
+            Line:     line,
+            Col:      col,
+            Severity: SeverityError,
+        })
+    }
+    return diags
+}
+```
+
+All other rules implement the standard `Check(stmt *pg_query.RawStmt, sql string)` method which operates on a single statement.
+
+---
+
+## Why is this Opt-In?
+
+The `multi-statement` rule is opt-in because:
+
+1. **Migration files** legitimately batch multiple DDL statements together:
+   ```sql
+   CREATE TABLE users (id SERIAL PRIMARY KEY);
+   CREATE INDEX idx_users_email ON users(email);
+   ALTER TABLE users ADD CONSTRAINT check_email CHECK (email ~ '@');
+   ```
+
+2. **Schema dumps** and backups contain hundreds of statements:
+   ```sql
+   CREATE TABLE ...; CREATE TABLE ...; CREATE INDEX ...;
+   ```
+
+3. **Admin scripts** often combine operations for convenience:
+   ```sql
+   DELETE FROM cache; VACUUM ANALYZE cache;
+   ```
+
+4. **ORM-generated SQL** in some frameworks may include semicolons
+
+However, in application code that dynamically constructs queries, multi-statement blocks are usually bugs.
+
+---
+
+## Use Cases
+
+### When to Enable
+
+**Application code analysis:**
+```bash
+# Check Go code extracting embedded SQL
+pgvet check --rules multi-statement ./app/**/*.go
+```
+
+**CI/CD validation:**
+```bash
+# Ensure developers don't commit multi-statement query blocks
+pgvet check --rules multi-statement ./queries/*.sql
+```
+
+**ORM query builder validation:**
+```bash
+# Catch bugs in query concatenation
+pgvet check --rules multi-statement ./generated_queries/
+```
+
+### When NOT to Enable
+
+**Migration files:**
+```bash
+# Don't check migrations (they're supposed to batch statements)
+pgvet check ./app/  # migrations/ excluded
+```
+
+**Schema dumps:**
+```bash
+# Don't check pg_dump output
+pgvet check --disable multi-statement schema_dump.sql
+```
+
+---
+
+## Real-World Example
+
+Consider this bug that `multi-statement` would catch:
+
+```go
+// WRONG: Developer assumes CTE scope carries over
+query := `
+  WITH recent_orders AS (
+    SELECT id, user_id FROM orders WHERE created_at > NOW() - INTERVAL '1 day'
+  )
+  SELECT user_id, COUNT(*) FROM recent_orders GROUP BY user_id;
+  
+  -- BUG: This statement runs AFTER the first completes,
+  -- and recent_orders is no longer defined!
+  DELETE FROM notifications 
+  WHERE order_id IN (SELECT id FROM recent_orders);
+`
+
+db.Exec(query)  // Runtime error!
+```
+
+**With pgvet:**
+```bash
+$ pgvet check --rules multi-statement app.go
+app.go:15:3 error: Statement 2 of 2 in a single block — each statement should be separate [multi-statement]
+```
+
+**Correct version:**
+```go
+// CORRECT: Use a single statement with multiple CTEs
+query := `
+  WITH recent_orders AS (
+    SELECT id, user_id FROM orders WHERE created_at > NOW() - INTERVAL '1 day'
+  ),
+  order_stats AS (
+    SELECT user_id, COUNT(*) FROM recent_orders GROUP BY user_id
+  )
+  DELETE FROM notifications 
+  WHERE order_id IN (SELECT id FROM recent_orders)
+  RETURNING (SELECT * FROM order_stats);
+`
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Default Rules" icon="shield-check" href="/rules/default-rules">
+    Explore the 15 rules that run by default
+  </Card>
+  <Card title="Rules Overview" icon="book" href="/rules/overview">
+    Understand the rule system architecture
+  </Card>
+</CardGroup>

@@ -1,0 +1,202 @@
+---
+title: Output Formats
+description: Understanding pgvet's text and JSON output formats
+---
+
+pgvet supports two output formats for diagnostics: `text` (the default) and `json`.
+
+## Text Format
+
+The text format is designed for human readability and follows a familiar compiler-style output:
+
+```
+file:line:col: severity: [rule-name] message
+```
+
+### Text Format Fields
+
+Each diagnostic line contains:
+
+1. **File path** — The file being analyzed (or `<stdin>` when reading from standard input)
+2. **Line number** — The line where the issue was detected (1-based)
+3. **Column number** — The column where the issue starts (1-based)
+4. **Severity** — Either `warning` or `error`
+5. **Rule name** — The identifier of the rule that triggered (in square brackets)
+6. **Message** — A description of the issue
+
+### Example Text Output
+
+```bash
+pgvet migrations/
+```
+
+Output:
+
+```
+migrations/001_schema.sql:12:8: warning: [select-star] SELECT * in outermost query is fragile — list columns explicitly
+migrations/001_schema.sql:45:1: warning: [delete-without-where] DELETE without WHERE deletes every row in the table
+migrations/002_users.sql:8:12: warning: [ban-char-type] CHAR type has space-padding semantics — use VARCHAR or TEXT
+```
+
+### When to Use Text Format
+
+The text format is ideal for:
+
+- **Local development** — Quick feedback while writing SQL
+- **Terminal output** — Easy to read in your shell
+- **Editor integration** — Many editors parse this format automatically
+- **CI logs** — Human-readable output in build logs
+
+## JSON Format
+
+The JSON format provides structured output for programmatic consumption:
+
+```bash
+pgvet --format=json schema.sql
+```
+
+### JSON Structure
+
+The JSON output is an array of diagnostic objects:
+
+```json
+[
+  {
+    "rule": "select-star",
+    "message": "SELECT * in outermost query is fragile — list columns explicitly",
+    "file": "schema.sql",
+    "line": 12,
+    "col": 8,
+    "severity": "warning"
+  },
+  {
+    "rule": "delete-without-where",
+    "message": "DELETE without WHERE deletes every row in the table",
+    "file": "schema.sql",
+    "line": 45,
+    "col": 1,
+    "severity": "warning"
+  }
+]
+```
+
+### JSON Fields
+
+Each diagnostic object contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rule` | `string` | The rule identifier (e.g., `select-star`) |
+| `message` | `string` | Human-readable description of the issue |
+| `file` | `string` | File path (or `<stdin>`) |
+| `line` | `number` | Line number (1-based) |
+| `col` | `number` | Column number (1-based) |
+| `severity` | `string` | Either `warning` or `error` |
+
+### When to Use JSON Format
+
+The JSON format is ideal for:
+
+- **CI/CD pipelines** — Parse results to fail builds or create reports
+- **Code review tools** — Integrate pgvet into GitHub Actions, GitLab CI, etc.
+- **Custom reporting** — Generate HTML reports, charts, or metrics
+- **Automated workflows** — Trigger actions based on specific rules or severities
+
+## Parsing JSON Output
+
+Here are examples of parsing pgvet JSON output in different contexts:
+
+### Bash Script with jq
+
+Count the number of errors:
+
+```bash
+error_count=$(pgvet --format=json migrations/ | jq '[.[] | select(.severity == "error")] | length')
+
+if [ "$error_count" -gt 0 ]; then
+  echo "Found $error_count errors"
+  exit 1
+fi
+```
+
+List all files with issues:
+
+```bash
+pgvet --format=json migrations/ | jq -r '.[].file' | sort -u
+```
+
+Filter diagnostics by rule:
+
+```bash
+pgvet --format=json schema.sql | jq '.[] | select(.rule == "select-star")'
+```
+
+### Python Script
+
+Generate a summary report:
+
+```python
+import json
+import subprocess
+
+result = subprocess.run(
+    ["pgvet", "--format=json", "migrations/"],
+    capture_output=True,
+    text=True
+)
+
+diagnostics = json.loads(result.stdout)
+
+# Group by severity
+by_severity = {}
+for diag in diagnostics:
+    severity = diag["severity"]
+    by_severity.setdefault(severity, []).append(diag)
+
+print(f"Warnings: {len(by_severity.get('warning', []))}")
+print(f"Errors: {len(by_severity.get('error', []))}")
+
+# Exit with error if any errors found
+if by_severity.get("error"):
+    exit(1)
+```
+
+### JavaScript/Node.js
+
+Integrate into a build script:
+
+```javascript
+const { execSync } = require('child_process');
+
+try {
+  const output = execSync('pgvet --format=json migrations/', { encoding: 'utf-8' });
+  const diagnostics = JSON.parse(output);
+  
+  // Group by file
+  const byFile = diagnostics.reduce((acc, diag) => {
+    acc[diag.file] = acc[diag.file] || [];
+    acc[diag.file].push(diag);
+    return acc;
+  }, {});
+  
+  console.log(`Issues found in ${Object.keys(byFile).length} files`);
+  
+} catch (error) {
+  console.error('pgvet failed:', error.message);
+  process.exit(1);
+}
+```
+
+## Empty Results
+
+When no issues are found, both formats produce minimal output:
+
+**Text format**: No output (empty)
+
+**JSON format**: An empty array
+
+```json
+[]
+```
+
+In both cases, the exit code is `0`.

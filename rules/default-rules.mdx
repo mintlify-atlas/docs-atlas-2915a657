@@ -1,0 +1,682 @@
+---
+title: Default Rules
+description: Comprehensive reference for all rules enabled by default
+---
+
+These 15 rules run automatically when you execute `pgvet check`. Each rule detects a specific SQL anti-pattern.
+
+## Quick Reference
+
+| Rule | Severity | Category | Description |
+|------|----------|----------|-------------|
+| [select-star](#select-star) | warning | Best Practice | `SELECT *` is fragile — list columns explicitly |
+| [limit-without-order](#limit-without-order) | warning | Correctness | `LIMIT` without `ORDER BY` is non-deterministic |
+| [not-in-subquery](#not-in-subquery) | error | Correctness | `NOT IN (SELECT ...)` broken with NULLs |
+| [for-update-no-skip](#for-update-no-skip) | warning | Performance | `FOR UPDATE` without `SKIP LOCKED`/`NOWAIT` |
+| [distinct-on-order](#distinct-on-order) | warning | Correctness | `DISTINCT ON` needs matching `ORDER BY` |
+| [null-comparison](#null-comparison) | error | Correctness | `= NULL` or `<> NULL` always yields NULL |
+| [update-without-where](#update-without-where) | warning | Safety | `UPDATE` without `WHERE` updates all rows |
+| [delete-without-where](#delete-without-where) | warning | Safety | `DELETE` without `WHERE` deletes all rows |
+| [insert-without-columns](#insert-without-columns) | warning | Best Practice | `INSERT` without column list is fragile |
+| [ban-char-type](#ban-char-type) | warning | Best Practice | `char(n)` pads with spaces |
+| [timestamp-without-timezone](#timestamp-without-timezone) | warning | Best Practice | Use `timestamptz` to preserve timezone |
+| [order-by-ordinal](#order-by-ordinal) | warning | Best Practice | `ORDER BY 1` is fragile |
+| [group-by-ordinal](#group-by-ordinal) | warning | Best Practice | `GROUP BY 1` is fragile |
+| [like-starts-with-wildcard](#like-starts-with-wildcard) | warning | Performance | `LIKE '%...'` prevents index usage |
+| [offset-without-limit](#offset-without-limit) | warning | Correctness | `OFFSET` without `LIMIT` likely a mistake |
+
+---
+
+## Correctness Rules
+
+### not-in-subquery
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** error  
+    **Name:** `not-in-subquery`
+
+    `NOT IN (SELECT ...)` is broken when the subquery can return NULLs. PostgreSQL's NULL semantics mean that if any subquery value is NULL, the entire expression yields NULL (not TRUE or FALSE), causing rows to be incorrectly excluded.
+
+    **Solution:** Use `NOT EXISTS` instead.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Broken if banned.user_id contains any NULLs
+    SELECT * FROM users 
+    WHERE id NOT IN (SELECT user_id FROM banned)
+    ```
+
+    ```sql
+    -- WRONG: Even with other columns
+    SELECT * FROM orders
+    WHERE user_id NOT IN (SELECT user_id FROM refunds)
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use NOT EXISTS
+    SELECT * FROM users u
+    WHERE NOT EXISTS (
+        SELECT 1 FROM banned b WHERE b.user_id = u.id
+    )
+    ```
+
+    ```sql
+    -- CORRECT: IN with subquery is fine
+    SELECT * FROM users
+    WHERE id IN (SELECT user_id FROM active)
+    ```
+
+    ```sql
+    -- CORRECT: NOT IN with literal list is fine
+    SELECT * FROM users
+    WHERE status NOT IN ('banned', 'deleted')
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### null-comparison
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** error  
+    **Name:** `null-comparison`
+
+    Using `= NULL` or `<> NULL` always yields NULL (not TRUE or FALSE) in SQL's three-valued logic. These comparisons will never match any rows.
+
+    **Solution:** Use `IS NULL` or `IS NOT NULL`.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Never matches any rows
+    SELECT * FROM users WHERE id = NULL
+    ```
+
+    ```sql
+    -- WRONG: Never matches any rows
+    SELECT * FROM users WHERE id <> NULL
+    ```
+
+    ```sql
+    -- WRONG: Even in reverse order
+    SELECT * FROM users WHERE NULL = id
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use IS NULL
+    SELECT * FROM users WHERE id IS NULL
+    ```
+
+    ```sql
+    -- CORRECT: Use IS NOT NULL
+    SELECT * FROM users WHERE id IS NOT NULL
+    ```
+
+    ```sql
+    -- CORRECT: Normal comparisons are fine
+    SELECT * FROM users WHERE id = 1
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### limit-without-order
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `limit-without-order`
+
+    Using `LIMIT` without `ORDER BY` produces non-deterministic results — PostgreSQL may return different rows on each execution.
+
+    **Exception:** `LIMIT 1` is exempted as it's commonly used for existence checks.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Which 10 users? Results vary between runs
+    SELECT id FROM users LIMIT 10
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Deterministic ordering
+    SELECT id FROM users ORDER BY id LIMIT 10
+    ```
+
+    ```sql
+    -- CORRECT: LIMIT 1 for existence check is exempted
+    SELECT id FROM users WHERE email = 'test@example.com' LIMIT 1
+    ```
+
+    ```sql
+    -- CORRECT: No LIMIT at all
+    SELECT id FROM users
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### distinct-on-order
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `distinct-on-order`
+
+    `DISTINCT ON` without a matching leading `ORDER BY` produces non-deterministic results. PostgreSQL returns the "first" row for each distinct group, but without ordering, which row is "first" is arbitrary.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Which employee per dept? Non-deterministic
+    SELECT DISTINCT ON (dept_id) dept_id, name FROM employees
+    ```
+
+    ```sql
+    -- WRONG: ORDER BY doesn't match DISTINCT ON columns
+    SELECT DISTINCT ON (dept_id) dept_id, name 
+    FROM employees 
+    ORDER BY name
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: ORDER BY matches DISTINCT ON
+    SELECT DISTINCT ON (dept_id) dept_id, name 
+    FROM employees 
+    ORDER BY dept_id, salary DESC
+    ```
+
+    ```sql
+    -- CORRECT: Plain DISTINCT is fine
+    SELECT DISTINCT status FROM orders
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### offset-without-limit
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `offset-without-limit`
+
+    `OFFSET` without `LIMIT` skips rows but then returns all remaining rows. This is rarely intentional and usually indicates a pagination bug.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Returns all rows after row 10 (likely unintended)
+    SELECT * FROM users OFFSET 10
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Proper pagination
+    SELECT * FROM users LIMIT 10 OFFSET 5
+    ```
+
+    ```sql
+    -- CORRECT: LIMIT without OFFSET
+    SELECT * FROM users LIMIT 10
+    ```
+
+    ```sql
+    -- CORRECT: No pagination clauses
+    SELECT * FROM users
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Safety Rules
+
+### update-without-where
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `update-without-where`
+
+    `UPDATE` without a `WHERE` clause updates every row in the table. This is rarely intentional in application code.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Updates every single user
+    UPDATE users SET active = false
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Updates specific user
+    UPDATE users SET active = false WHERE id = 1
+    ```
+
+    ```sql
+    -- CORRECT: Updates with JOIN condition
+    UPDATE orders SET status = 'shipped' 
+    FROM shipments 
+    WHERE orders.id = shipments.order_id
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### delete-without-where
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `delete-without-where`
+
+    `DELETE` without a `WHERE` clause deletes every row in the table. Use `TRUNCATE` if this is intentional.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Deletes all users
+    DELETE FROM users
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Deletes specific user
+    DELETE FROM users WHERE id = 1
+    ```
+
+    ```sql
+    -- CORRECT: Delete with USING join
+    DELETE FROM orders 
+    USING expired 
+    WHERE orders.id = expired.id
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Performance Rules
+
+### for-update-no-skip
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `for-update-no-skip`
+
+    `FOR UPDATE` without `SKIP LOCKED` or `NOWAIT` can cause lock contention. If another transaction holds a lock, your query will wait indefinitely.
+
+    **Note:** Only flags exclusive lock modes (`FOR UPDATE` and `FOR NO KEY UPDATE`). `FOR SHARE` is exempted.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Will wait indefinitely if rows are locked
+    SELECT id FROM items ORDER BY id FOR UPDATE
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Skip locked rows (queue processing)
+    SELECT id FROM items ORDER BY id FOR UPDATE SKIP LOCKED
+    ```
+
+    ```sql
+    -- CORRECT: Fail fast if locked
+    SELECT id FROM items ORDER BY id FOR UPDATE NOWAIT
+    ```
+
+    ```sql
+    -- CORRECT: FOR SHARE doesn't require SKIP LOCKED
+    SELECT id FROM items WHERE id = 1 FOR SHARE
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### like-starts-with-wildcard
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `like-starts-with-wildcard`
+
+    `LIKE` or `ILIKE` patterns starting with `%` cannot use B-tree indexes, forcing a full table scan.
+
+    **Solution:** Use PostgreSQL's full-text search or trigram indexes for substring searches.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Full table scan
+    SELECT * FROM users WHERE name LIKE '%test'
+    ```
+
+    ```sql
+    -- WRONG: Both leading and trailing wildcard
+    SELECT * FROM users WHERE name LIKE '%test%'
+    ```
+
+    ```sql
+    -- WRONG: ILIKE has same issue
+    SELECT * FROM users WHERE name ILIKE '%test'
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Trailing wildcard can use index
+    SELECT * FROM users WHERE name LIKE 'test%'
+    ```
+
+    ```sql
+    -- CORRECT: Exact match
+    SELECT * FROM users WHERE name LIKE 'test'
+    ```
+
+    ```sql
+    -- CORRECT: Equality comparison
+    SELECT * FROM users WHERE name = 'test'
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Best Practice Rules
+
+### select-star
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `select-star`
+
+    `SELECT *` in the outermost query is fragile — if table columns change, your application code may break. Explicitly list the columns you need.
+
+    **Note:** `SELECT *` inside CTEs is allowed.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Fragile to schema changes
+    SELECT * FROM users WHERE id = 1
+    ```
+
+    ```sql
+    -- WRONG: Even with CTE, outer SELECT * is flagged
+    WITH f AS (SELECT id FROM users) 
+    SELECT * FROM f
+    ```
+
+    ```sql
+    -- WRONG: Both sides of UNION flagged
+    SELECT * FROM users UNION ALL SELECT * FROM admins
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Explicit columns
+    SELECT id, name FROM users
+    ```
+
+    ```sql
+    -- CORRECT: SELECT * inside CTE is allowed
+    WITH f AS (SELECT * FROM users) 
+    SELECT id, name FROM f
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### insert-without-columns
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `insert-without-columns`
+
+    `INSERT` without an explicit column list depends on column order, which may change if columns are added or reordered.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Depends on column order
+    INSERT INTO users VALUES (1, 'alice')
+    ```
+
+    ```sql
+    -- WRONG: INSERT SELECT without columns
+    INSERT INTO users SELECT * FROM temp
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Explicit columns
+    INSERT INTO users (id, name) VALUES (1, 'alice')
+    ```
+
+    ```sql
+    -- CORRECT: INSERT SELECT with columns
+    INSERT INTO users (id, name) SELECT id, name FROM temp
+    ```
+
+    ```sql
+    -- CORRECT: DEFAULT VALUES is allowed
+    INSERT INTO users DEFAULT VALUES
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### ban-char-type
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `ban-char-type`
+
+    `char(n)` (or `character(n)`) pads values with spaces to the specified length. This behavior is surprising and rarely desired. Use `text` or `varchar` instead.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Will pad with spaces
+    CREATE TABLE t (code char(10))
+    ```
+
+    ```sql
+    -- WRONG: character(n) is the same as char(n)
+    CREATE TABLE t (code character(10))
+    ```
+
+    ```sql
+    -- WRONG: CAST to char also flagged
+    SELECT x::char(5) FROM t
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use varchar
+    CREATE TABLE t (name varchar(100))
+    ```
+
+    ```sql
+    -- CORRECT: Use text (preferred)
+    CREATE TABLE t (name text)
+    ```
+
+    ```sql
+    -- CORRECT: CAST to text
+    SELECT x::text FROM t
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### timestamp-without-timezone
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `timestamp-without-timezone`
+
+    `timestamp without time zone` loses timezone context. When users in different timezones interact with your data, this causes ambiguity and bugs.
+
+    **Solution:** Use `timestamptz` (or `timestamp with time zone`).
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Loses timezone context
+    CREATE TABLE t (created_at timestamp)
+    ```
+
+    ```sql
+    -- WRONG: Explicit "without time zone"
+    CREATE TABLE t (created_at timestamp without time zone)
+    ```
+
+    ```sql
+    -- WRONG: CAST to timestamp
+    SELECT now()::timestamp
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use timestamptz
+    CREATE TABLE t (created_at timestamptz)
+    ```
+
+    ```sql
+    -- CORRECT: Explicit "with time zone"
+    CREATE TABLE t (created_at timestamp with time zone)
+    ```
+
+    ```sql
+    -- CORRECT: CAST to timestamptz
+    SELECT now()::timestamptz
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### order-by-ordinal
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `order-by-ordinal`
+
+    `ORDER BY` using ordinal positions (e.g., `ORDER BY 1`) is fragile — if the SELECT list changes, the ordering silently breaks.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Fragile positional reference
+    SELECT id, name FROM users ORDER BY 1
+    ```
+
+    ```sql
+    -- WRONG: Multiple ordinals
+    SELECT id, name FROM users ORDER BY 1, 2
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use column name
+    SELECT id, name FROM users ORDER BY id
+    ```
+
+    ```sql
+    -- CORRECT: No ORDER BY
+    SELECT id FROM users
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### group-by-ordinal
+
+<AccordionGroup>
+  <Accordion title="Rule Details">
+    **Severity:** warning  
+    **Name:** `group-by-ordinal`
+
+    `GROUP BY` using ordinal positions (e.g., `GROUP BY 1`) is fragile — if the SELECT list changes, the grouping silently breaks.
+  </Accordion>
+
+  <Accordion title="Problematic Examples">
+    ```sql
+    -- WRONG: Fragile positional reference
+    SELECT status, count(*) FROM users GROUP BY 1
+    ```
+
+    ```sql
+    -- WRONG: Multiple ordinals
+    SELECT a, b, count(*) FROM t GROUP BY 1, 2
+    ```
+  </Accordion>
+
+  <Accordion title="Correct Examples">
+    ```sql
+    -- CORRECT: Use column name
+    SELECT status, count(*) FROM users GROUP BY status
+    ```
+
+    ```sql
+    -- CORRECT: No GROUP BY
+    SELECT id FROM users
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Disabling Specific Rules
+
+If a rule doesn't fit your use case, disable it:
+
+```bash
+pgvet check --disable select-star
+pgvet check --disable select-star,limit-without-order
+```
+
+## Next Steps
+
+<Card title="Opt-In Rules" icon="toggle-on" href="/rules/opt-in-rules">
+  Learn about rules that require explicit enablement
+</Card>

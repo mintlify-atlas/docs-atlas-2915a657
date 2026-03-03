@@ -1,0 +1,286 @@
+---
+title: Writing Custom Rules
+description: Learn how to extend pgvet with your own SQL analysis rules
+---
+
+pgvet is designed to be extensible. You can write custom rules to enforce your team's SQL conventions or catch project-specific antipatterns.
+
+## The Rule Interface
+
+All pgvet rules implement the `Rule` interface defined in `rule/rule.go:24`:
+
+```go
+type Rule interface {
+    Name() string
+    Description() string
+    Check(stmt *pg_query.RawStmt, sql string) []Diagnostic
+}
+```
+
+### Methods
+
+- **Name()**: Returns a kebab-case identifier for the rule (e.g., `"select-star"`)
+- **Description()**: Returns a human-readable explanation of what the rule checks
+- **Check()**: Analyzes a parsed SQL statement and returns diagnostics for any issues found
+
+### Diagnostic Structure
+
+The `Diagnostic` struct represents an issue found by a rule:
+
+```go
+type Diagnostic struct {
+    Rule     string `json:"rule"`
+    Message  string `json:"message"`
+    File     string `json:"file"`
+    Line     int    `json:"line"`
+    Col      int    `json:"col"`
+    Severity string `json:"severity"`
+}
+```
+
+Severity can be:
+- `rule.SeverityWarning` - Stylistic issues or suggestions
+- `rule.SeverityError` - Logical errors or dangerous patterns
+
+## AST Traversal with walker.Walk
+
+For rules that need to inspect nested SQL structures (subqueries, CTEs, etc.), use the `walker.Walk` helper from `walker/walker.go:11`:
+
+```go
+import "github.com/mnafees/pgvet/walker"
+
+walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+    // Inspect each node in the AST
+    // Return true to continue traversal, false to stop
+    return true
+})
+```
+
+The walker recursively visits every node in the parse tree, making it easy to find specific patterns anywhere in the SQL.
+
+## Example: Simple Rule Without Traversal
+
+Here's the `select-star` rule that checks only the outermost SELECT statement:
+
+```go
+package rule
+
+import (
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+)
+
+type SelectStar struct{}
+
+func (r *SelectStar) Name() string {
+    return "select-star"
+}
+
+func (r *SelectStar) Description() string {
+    return "SELECT * in outermost query is fragile — list columns explicitly"
+}
+
+func (r *SelectStar) Check(stmt *pg_query.RawStmt, sql string) []Diagnostic {
+    sel := stmt.Stmt.GetSelectStmt()
+    if sel == nil {
+        return nil
+    }
+    return r.checkOutermost(sel, sql, stmt.StmtLocation)
+}
+
+func (r *SelectStar) checkOutermost(sel *pg_query.SelectStmt, sql string, baseOffset int32) []Diagnostic {
+    // Handle UNION/INTERSECT/EXCEPT
+    if sel.Op != pg_query.SetOperation_SETOP_NONE {
+        var diags []Diagnostic
+        if sel.Larg != nil {
+            diags = append(diags, r.checkOutermost(sel.Larg, sql, baseOffset)...)
+        }
+        if sel.Rarg != nil {
+            diags = append(diags, r.checkOutermost(sel.Rarg, sql, baseOffset)...)
+        }
+        return diags
+    }
+
+    var diags []Diagnostic
+    for _, target := range sel.TargetList {
+        rt := target.GetResTarget()
+        if rt == nil {
+            continue
+        }
+        cr := rt.Val.GetColumnRef()
+        if cr == nil {
+            continue
+        }
+        // Check if any field is a star (*)
+        for _, field := range cr.Fields {
+            if field.GetAStar() != nil {
+                line, col := offsetToLineCol(sql, int(cr.Location))
+                diags = append(diags, Diagnostic{
+                    Rule:     r.Name(),
+                    Message:  r.Description(),
+                    Line:     line,
+                    Col:      col,
+                    Severity: SeverityWarning,
+                })
+            }
+        }
+    }
+    return diags
+}
+```
+
+## Example: Rule with AST Traversal
+
+The `not-in-subquery` rule uses `walker.Walk` to find problematic patterns anywhere in the query:
+
+```go
+package rule
+
+import (
+    pg_query "github.com/pganalyze/pg_query_go/v6"
+    "github.com/mnafees/pgvet/walker"
+)
+
+type NotInSubquery struct{}
+
+func (r *NotInSubquery) Name() string {
+    return "not-in-subquery"
+}
+
+func (r *NotInSubquery) Description() string {
+    return "NOT IN (SELECT ...) is broken when the subquery can return NULLs — use NOT EXISTS instead"
+}
+
+func (r *NotInSubquery) Check(stmt *pg_query.RawStmt, sql string) []Diagnostic {
+    var diags []Diagnostic
+
+    walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+        // PostgreSQL parses "NOT IN (SELECT ...)" as:
+        //   BoolExpr(NOT_EXPR, args: [SubLink(ANY_SUBLINK, ...)])
+        be := node.GetBoolExpr()
+        if be == nil {
+            return true // Continue traversal
+        }
+        if be.Boolop != pg_query.BoolExprType_NOT_EXPR {
+            return true
+        }
+
+        for _, arg := range be.Args {
+            sl := arg.GetSubLink()
+            if sl == nil {
+                continue
+            }
+            if sl.SubLinkType != pg_query.SubLinkType_ANY_SUBLINK {
+                continue
+            }
+
+            line, col := offsetToLineCol(sql, int(be.Location))
+            diags = append(diags, Diagnostic{
+                Rule:     r.Name(),
+                Message:  r.Description(),
+                Line:     line,
+                Col:      col,
+                Severity: SeverityError,
+            })
+        }
+
+        return true // Continue traversal
+    })
+
+    return diags
+}
+```
+
+## Converting Byte Offsets to Line/Column
+
+Nodes in the AST have a `Location` field with a byte offset. Use `offsetToLineCol` to convert this to 1-based line and column numbers:
+
+```go
+line, col := offsetToLineCol(sql, int(node.Location))
+```
+
+This helper is defined in `rule/util.go:4` and handles newline counting for you.
+
+## Registering Custom Rules
+
+To use your custom rule:
+
+1. Add it to the `All()` function in `rule/rules.go` for default rules
+2. Or add it to `Extra()` for opt-in rules that users must explicitly enable with `--rules`
+
+```go
+func All() []Rule {
+    return []Rule{
+        &SelectStar{},
+        &NotInSubquery{},
+        &YourCustomRule{},  // Add here
+        // ...
+    }
+}
+```
+
+## Testing Your Rule
+
+Create a test file following the pattern in `rule/select_star_test.go`. Test both positive and negative cases:
+
+```go
+func TestYourRule(t *testing.T) {
+    r := &YourCustomRule{}
+    
+    tests := []struct {
+        name     string
+        sql      string
+        wantDiag bool
+    }{
+        {"should flag this", "SELECT ...", true},
+        {"should pass this", "SELECT ...", false},
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            // Parse and check...
+        })
+    }
+}
+```
+
+## Learning More
+
+The AST structure comes from PostgreSQL's parser via [pg_query_go](https://github.com/pganalyze/pg_query_go). To understand the structure:
+
+1. Use the [pg_query parser demo](https://pganalyze.com/docs/pg_query/walkthrough) to visualize SQL as protobuf
+2. Read the [protobuf definitions](https://github.com/pganalyze/pg_query_go/blob/main/parser/pg_query.proto)
+3. Study existing pgvet rules in `rule/*.go` for common patterns
+
+## Common Patterns
+
+### Checking for specific statement types
+
+```go
+if sel := stmt.Stmt.GetSelectStmt(); sel != nil {
+    // It's a SELECT statement
+}
+if upd := stmt.Stmt.GetUpdateStmt(); upd != nil {
+    // It's an UPDATE statement
+}
+```
+
+### Finding function calls
+
+```go
+walker.Walk(stmt.Stmt, func(node *pg_query.Node) bool {
+    if fc := node.GetFuncCall(); fc != nil {
+        // Check function name, arguments, etc.
+    }
+    return true
+})
+```
+
+### Detecting WHERE clause absence
+
+```go
+if upd := stmt.Stmt.GetUpdateStmt(); upd != nil {
+    if upd.WhereClause == nil {
+        // UPDATE without WHERE clause
+    }
+}
+```

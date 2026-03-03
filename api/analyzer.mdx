@@ -1,0 +1,250 @@
+---
+title: Analyzer
+description: Run static analysis rules against PostgreSQL SQL files
+---
+
+## Overview
+
+The `Analyzer` struct orchestrates the execution of pgvet rules against SQL files and directories. It handles file discovery, SQL parsing, rule execution, and diagnostic collection.
+
+## Analyzer Struct
+
+```go
+type Analyzer struct {
+    Rules []rule.Rule
+}
+```
+
+### Fields
+
+<ResponseField name="Rules" type="[]rule.Rule" required>
+  The slice of rules to execute during analysis. Each rule implements the `Rule` interface.
+</ResponseField>
+
+## Constructor
+
+### New
+
+Creates a new Analyzer with the given rules.
+
+```go
+func New(rules []rule.Rule) *Analyzer
+```
+
+<ParamField path="rules" type="[]rule.Rule" required>
+  The rules to run during analysis. Pass an empty slice to run no rules.
+</ParamField>
+
+**Returns:** A new `*Analyzer` instance
+
+**Example:**
+
+```go
+import (
+    "github.com/mnafees/pgvet/analyzer"
+    "github.com/mnafees/pgvet/rule"
+)
+
+// Create analyzer with multiple rules
+a := analyzer.New([]rule.Rule{
+    &rule.DeleteWithoutWhere{},
+    &rule.UpdateWithoutWhere{},
+    &rule.SelectStarRule{},
+})
+```
+
+## Methods
+
+### AnalyzePaths
+
+Analyzes one or more file or directory paths.
+
+```go
+func (a *Analyzer) AnalyzePaths(paths []string) ([]rule.Diagnostic, error)
+```
+
+<ParamField path="paths" type="[]string" required>
+  Paths to analyze. Can include:
+  - Individual `.sql` files
+  - Directories (recursively scanned for `.sql` files)
+  - Mix of both files and directories
+</ParamField>
+
+**Returns:** 
+- `[]rule.Diagnostic`: All diagnostics found, sorted by file, line, and column
+- `error`: Any error that occurred during analysis (file not found, permission denied, etc.)
+
+**Behavior:**
+- Recursively walks directories looking for `.sql` files
+- Parses each SQL file and splits it into individual statements
+- Runs all configured rules against each statement
+- Collects and sorts diagnostics by location
+- Reports parse errors as diagnostics with rule name `"parse-error"`
+
+**Example:**
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    
+    "github.com/mnafees/pgvet/analyzer"
+    "github.com/mnafees/pgvet/rule"
+)
+
+func main() {
+    // Create analyzer with rules
+    a := analyzer.New([]rule.Rule{
+        &rule.DeleteWithoutWhere{},
+        &rule.LimitWithoutOrder{},
+    })
+    
+    // Analyze multiple paths
+    paths := []string{
+        "./migrations",           // directory
+        "./queries/users.sql",    // single file
+        "./schema",               // another directory
+    }
+    
+    diags, err := a.AnalyzePaths(paths)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Print diagnostics
+    for _, d := range diags {
+        fmt.Printf("%s:%d:%d: [%s] %s (%s)\n",
+            d.File, d.Line, d.Col, d.Severity, d.Message, d.Rule)
+    }
+}
+```
+
+**Output example:**
+```
+migrations/001_users.sql:15:1: [warning] DELETE without WHERE deletes every row in the table (delete-without-where)
+migrations/003_orders.sql:42:5: [warning] LIMIT without ORDER BY may return unpredictable results (limit-without-order)
+```
+
+### AnalyzeStdin
+
+Analyzes SQL from stdin.
+
+```go
+func (a *Analyzer) AnalyzeStdin(sql string) ([]rule.Diagnostic, error)
+```
+
+<ParamField path="sql" type="string" required>
+  The SQL code to analyze, typically read from standard input
+</ParamField>
+
+**Returns:** 
+- `[]rule.Diagnostic`: All diagnostics found
+- `error`: Any error during parsing or analysis
+
+**Behavior:**
+- Parses the SQL string and splits it into statements
+- Runs all configured rules against each statement
+- Sets the file name to `"<stdin>"` in diagnostics
+- Reports parse errors as diagnostics
+
+**Example:**
+
+```go
+package main
+
+import (
+    "fmt"
+    "io"
+    "log"
+    "os"
+    
+    "github.com/mnafees/pgvet/analyzer"
+    "github.com/mnafees/pgvet/rule"
+)
+
+func main() {
+    // Create analyzer
+    a := analyzer.New([]rule.Rule{
+        &rule.DeleteWithoutWhere{},
+    })
+    
+    // Read from stdin
+    sql, err := io.ReadAll(os.Stdin)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Analyze the SQL
+    diags, err := a.AnalyzeStdin(string(sql))
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Print diagnostics
+    for _, d := range diags {
+        fmt.Printf("%s:%d:%d: [%s] %s\n",
+            d.File, d.Line, d.Col, d.Severity, d.Message)
+    }
+}
+```
+
+**Usage:**
+```bash
+echo "DELETE FROM users;" | go run main.go
+# Output: <stdin>:1:1: [warning] DELETE without WHERE deletes every row in the table
+```
+
+## How Analysis Works
+
+The analyzer follows this workflow:
+
+1. **File Discovery**
+   - For directories: recursively finds all `.sql` files
+   - For files: reads them directly
+
+2. **SQL Parsing**
+   - Splits SQL into individual statements using `pg_query.SplitWithParser`
+   - Parses each statement into an AST using `pg_query.Parse`
+   - Parse errors are reported as diagnostics
+
+3. **Rule Execution**
+   - For each statement, runs every configured rule's `Check()` method
+   - Handles special multi-statement rules separately
+   - Collects all diagnostics
+
+4. **Post-Processing**
+   - Sets the `File` field on each diagnostic
+   - Sorts diagnostics by file, line, and column
+   - Returns sorted results
+
+## Diagnostic Sorting
+
+Diagnostics are sorted in this order:
+1. File path (alphabetically)
+2. Line number (ascending)
+3. Column number (ascending)
+
+This ensures consistent, predictable output that's easy to process.
+
+## Error Handling
+
+The analyzer handles errors at multiple levels:
+
+- **File system errors**: Returned as errors (file not found, permission denied)
+- **Parse errors**: Converted to diagnostics with rule name `"parse-error"` and severity `"error"`
+- **Rule errors**: Rules should not panic; return empty slice if statement doesn't match
+
+## Performance Considerations
+
+- The analyzer processes files sequentially
+- Each SQL file is parsed once
+- All rules run on each statement (O(statements × rules))
+- For large codebases, consider running in parallel externally
+
+## See Also
+
+- [Rule Interface](/api/rule-interface) - Implement custom rules
+- [Walker](/api/walker) - Traverse PostgreSQL AST nodes
+- [Built-in Rules](/rules/overview) - Available rules

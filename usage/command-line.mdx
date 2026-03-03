@@ -1,0 +1,176 @@
+---
+title: Command Line
+description: Complete reference for pgvet command-line usage
+---
+
+## Command Syntax
+
+The basic syntax for running pgvet is:
+
+```bash
+pgvet [flags] <file-or-dir>...
+```
+
+You can analyze:
+- A single SQL file
+- A directory (recursively scans for `.sql` files)
+- Multiple files or directories
+- SQL from stdin (when no arguments are provided)
+
+## Flags
+
+pgvet accepts the following command-line flags:
+
+### --format
+
+**Type**: `string`  
+**Default**: `text`  
+**Values**: `text`, `json`
+
+Sets the output format for diagnostics.
+
+```bash
+pgvet --format=json migrations/
+```
+
+See [Output Formats](/usage/output-formats) for details on each format.
+
+### --rules
+
+**Type**: `string`  
+**Default**: (all default rules)  
+**Format**: Comma-separated list of rule names
+
+Runs only the specified rules. When you use this flag, you can also enable opt-in rules that are not part of the default set.
+
+```bash
+pgvet --rules=select-star,delete-without-where schema.sql
+```
+
+See [Configuration](/usage/configuration) for rule selection strategies.
+
+### --exclude
+
+**Type**: `string`  
+**Default**: (none)  
+**Format**: Comma-separated list of rule names
+
+Excludes specific rules from the analysis.
+
+```bash
+pgvet --exclude=select-star migrations/
+```
+
+## Usage Examples
+
+### Analyze a Single File
+
+Run all default rules on a single SQL file:
+
+```bash
+pgvet schema.sql
+```
+
+Example output:
+
+```
+schema.sql:12:8: warning: [select-star] SELECT * in outermost query is fragile — list columns explicitly
+schema.sql:45:1: warning: [delete-without-where] DELETE without WHERE deletes every row in the table
+```
+
+### Analyze a Directory
+
+pgvet recursively scans directories for `.sql` files:
+
+```bash
+pgvet migrations/
+```
+
+Example output:
+
+```
+migrations/001_initial.sql:15:1: warning: [insert-without-columns] INSERT without column list is fragile
+migrations/003_users.sql:8:12: warning: [ban-char-type] CHAR type has space-padding semantics — use VARCHAR or TEXT
+```
+
+### Analyze Multiple Paths
+
+You can specify multiple files and directories:
+
+```bash
+pgvet schema.sql migrations/ queries/
+```
+
+### Analyze SQL from stdin
+
+When you don't provide any file or directory arguments, pgvet reads SQL from standard input:
+
+```bash
+echo "SELECT * FROM users" | pgvet
+```
+
+Output:
+
+```
+<stdin>:1:8: warning: [select-star] SELECT * in outermost query is fragile — list columns explicitly
+```
+
+This is useful for integrating with other tools or checking SQL on the fly:
+
+```bash
+cat query.sql | pgvet --format=json
+```
+
+### Combine Flags
+
+You can combine multiple flags:
+
+```bash
+pgvet --format=json --exclude=select-star --rules=delete-without-where,update-without-where migrations/
+```
+
+<Note>
+When both `--rules` and `--exclude` are specified, pgvet first selects the rules from `--rules`, then removes any rules listed in `--exclude`.
+</Note>
+
+## Exit Codes
+
+pgvet uses exit codes to indicate the result of the analysis:
+
+| Exit Code | Meaning |
+|-----------|----------|
+| `0` | No issues found — all analyzed SQL passed the selected rules |
+| `1` | Issues found — one or more diagnostics were reported |
+| `2` | Usage error or parse error — invalid flags, unable to read input, or malformed SQL |
+
+### Using Exit Codes in CI
+
+You can use the exit code to fail CI builds when issues are detected:
+
+```bash
+#!/bin/bash
+pgvet migrations/
+if [ $? -eq 1 ]; then
+  echo "SQL issues detected — review diagnostics above"
+  exit 1
+fi
+```
+
+Or more simply:
+
+```bash
+pgvet migrations/ || exit 1
+```
+
+## Getting Help
+
+To see all available flags and rules:
+
+```bash
+pgvet --help
+```
+
+The help output lists:
+- All command-line flags
+- Default rules (always enabled unless excluded)
+- Opt-in rules (only enabled when specified with `--rules`)
