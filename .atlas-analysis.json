@@ -1,0 +1,100 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "pgvet",
+  "projectDescription": "A static analysis tool for PostgreSQL SQL files powered by the real PostgreSQL parser",
+  "theme": "aspen",
+  "primaryColor": "#336791",
+  "lightColor": "#4A90D9",
+  "darkColor": "#2D5373",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Usage",
+            "pages": [
+              "usage/command-line",
+              "usage/output-formats",
+              "usage/configuration"
+            ]
+          },
+          {
+            "group": "Rules",
+            "pages": [
+              "rules/overview",
+              "rules/default-rules",
+              "rules/opt-in-rules"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/custom-rules",
+              "advanced/ci-integration",
+              "advanced/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/rule-interface",
+              "api/analyzer",
+              "api/walker"
+            ]
+          },
+          {
+            "group": "Rules",
+            "pages": [
+              "api/rules/select-star",
+              "api/rules/not-in-subquery",
+              "api/rules/limit-without-order",
+              "api/rules/null-comparison",
+              "api/rules/update-delete-without-where",
+              "api/rules/insert-without-columns",
+              "api/rules/type-warnings",
+              "api/rules/ordinal-warnings",
+              "api/rules/performance-warnings"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Uses real PostgreSQL parser (pg_query_go) for accurate SQL parsing",
+    "15 built-in rules detecting anti-patterns and correctness issues",
+    "No running database required - static analysis only",
+    "Supports file, directory, and stdin input",
+    "JSON and text output formats for CI integration",
+    "Extensible rule system for custom checks",
+    "Fast CGO-based parsing with embedded PostgreSQL parser"
+  ],
+  "publicApiSurface": [
+    "pgvet [flags] <file-or-dir>...",
+    "--format (text|json)",
+    "--rules <rule-list>",
+    "--exclude <rule-list>",
+    "Rule interface: Name(), Description(), Check()",
+    "Analyzer.New(rules)",
+    "Analyzer.AnalyzePaths(paths)",
+    "Analyzer.AnalyzeStdin(sql)",
+    "walker.Walk(node, visitor)",
+    "rule.All() - default rules",
+    "rule.Extra() - opt-in rules",
+    "rule.AllIncludingExtra() - all rules"
+  ]
+}
